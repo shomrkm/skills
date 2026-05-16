@@ -1,0 +1,33 @@
+{
+  "skill_name": "shomrkm-notion",
+  "evals": [
+    {
+      "id": 1,
+      "name": "tasks-add-today",
+      "prompt": "明日のカフェテリアプランを考えるってタスク、Todayに入れて。プロジェクトには紐付けない。description は空でOK。",
+      "expected_output": "Tasks DB に新規ページが作成される。properties: Name='カフェテリアプランを考える', task_type='Today', date:due_date:start='2026-05-12' (明日 = currentDate+1日)。project は空。AskUserQuestion は最小限 (project や description が空でよいか程度)。最終的に Notion URL を返す。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "lifelog-daily-log",
+      "prompt": "今日学んだこと記録したい。Claude Code の hooks の仕組みを理解して、PostToolUse で skill を自動更新できるようにした。",
+      "expected_output": "LifeLog DB に新規ページが作成される。properties: Date=今日 (2026-05-11), Tags は既存タグから AI / Memo / claude (など) を含めて提案・選択。content には Daily Log テンプレ (ハイライト / 詰まった点 / 学び Fact-Because-Next / 明日やる一手) 構造で、'Claude Code の hooks' に関する内容が Fact 等に埋められている。AskUserQuestion で Tags 確認・テンプレ使用確認をする。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "query-today-tasks",
+      "prompt": "今日やるタスク見せて",
+      "expected_output": "Tasks DB の In-Progress view を notion-query-database-view で取得し、task_type=Today のものだけを表形式で表示。各行に Notion URL を含める。書き込みは一切しない。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "knowledge-flexible",
+      "prompt": "Notion API の prompt caching についてまとめておきたい。AI summary を毎回フルで再送するんじゃなくて、Anthropic 側でキャッシュ参照する仕組み。コスト削減と速度向上に効く。",
+      "expected_output": "Knowledge DB に新規ページが作成される。properties: Title='Anthropic Prompt Caching' などの要約タイトル (ユーザーの長文をそのままタイトルにしない), Tags は既存から AI / claude / Prompt Engineering / Stock-doc 等を提案, Status='in-progress', is leaning note=true/false を確認。AskUserQuestion で構造 (Cornell Note? シンプル?) を確認 (柔軟記録派なのでCornell Note強制はしない)。content にユーザー発言を整理した内容を含む。",
+      "files": []
+    }
+  ]
+}
