@@ -1,7 +1,7 @@
 ---
 name: semantic-tree-learning
 description: |
-  Semantic Tree Learning skill: accelerate learning a new topic by structuring knowledge as a semantic tree and creating a learning note in a Notion database.
+  Semantic Tree Learning skill: accelerate learning a new topic by structuring knowledge as a semantic tree and creating a structured learning note.
   Always use this skill in situations like:
   - When the user wants to learn a new field or topic ("I want to learn X", "I want to study X", "I want to understand X")
   - When the user wants to systematize or organize existing knowledge ("I want to organize my knowledge of X", "I want to understand X deeply")
@@ -112,31 +112,20 @@ Confirm the following with the user:
 - Are there additional branches or leaves they want to know about?
 - Is there anything unclear about the trunk?
 
-### Step 5: Create the learning note in Notion
+### Step 5: Save the learning note
 
-Once the user is satisfied with the content, create a learning note in the Notion Knowledge database.
+Once the user is satisfied with the content, save the learning note.
 
-#### Notion database details
+#### Where to save
 
-**Note**: The IDs below are environment-specific settings. When using this in another environment, change them to the appropriate data source ID and template ID.
+Ask the user where they'd like the note saved, or follow their established convention. Common options:
 
-- **Data source ID**: `8288e3ed-6a64-4bc5-882c-04b78b775fc1`
-- **Cornell Note template ID**: `289d4af9-764f-802f-a01a-db66b687f317`
+- A markdown file in the repository or a notes directory (e.g. `notes/[topic-name]-semantic-tree.md`)
+- A note in the user's knowledge base or note-taking tool (e.g. Notion, Obsidian) — if that tool exposes a skill or API, use it; otherwise provide the markdown for the user to paste in
 
-**If the Notion API is unavailable**: provide the note to the user in markdown so they can copy it into Notion manually, or offer to save it as a local file.
+When saving into a structured database or knowledge base, include metadata such as a title (`[Topic name] - Semantic Tree`), a short description, a status, and relevant tags, matching whatever schema that tool uses.
 
-#### Properties of the page to create
-
-```json
-{
-  "Title": "[Topic name] - Semantic Tree",
-  "description": "Structured note on [topic name] using the semantic tree learning method",
-  "Status": "in-progress",
-  "Tags": "[select related tags from existing tags, or create new ones]"
-}
-```
-
-#### Page content structure
+#### Note content structure
 
 Create the content following the template below.
 
@@ -220,11 +209,11 @@ Recommended learning order:
 - [Resource 3] (URL)
 ```
 
-#### Using Related Knowledge
+#### Linking related notes
 
-If there are related notes in the existing Knowledge database, link them via the `Related Knowledge` property. This builds a network between pieces of knowledge and makes the connections between semantic trees visible too.
+If there are related notes already saved, link them together (via a relation property, wikilinks, or plain links — whatever your storage supports). This builds a network between pieces of knowledge and makes the connections between semantic trees visible too.
 
-To find related notes, use the Notion search tool to search by related keywords.
+To find related notes, search your existing notes by related keywords.
 
 ### Step 6: Follow-up
 
@@ -240,4 +229,4 @@ After creating the note, propose the following to the user:
 - **Explain in the user's own words.** Whenever you use technical terms, always add a plain-language explanation.
 - **Don't aim for perfection.** A semantic tree grows. Start with just the trunk and main branches; design it so you can add leaves later.
 - **Connect to existing knowledge.** Bridging what the user already knows with new knowledge promotes understanding and retention.
-- **Be flexible.** Even when WebSearch or the Notion API is unavailable, you can create a learning note by leveraging dialogue with the user and existing knowledge. Don't depend on tools — prioritize delivering the essential value: structured learning.
+- **Be flexible.** Even when web search or a particular note-taking tool is unavailable, you can create a learning note by leveraging dialogue with the user and existing knowledge. Don't depend on tools — prioritize delivering the essential value: structured learning.
