@@ -1,243 +1,243 @@
 ---
 name: semantic-tree-learning
 description: |
-  Semantic Tree Learning スキル：新しいトピックの学習を加速するために、知識をセマンティックツリー（意味の木）として構造化し、Notionデータベースに学習ノートを作成する。
-  このスキルは以下のような場面で必ず使うこと：
-  - ユーザーが新しい分野やトピックを学びたいと言ったとき（「〇〇を学びたい」「〇〇について勉強したい」「〇〇を理解したい」）
-  - ユーザーが既存の知識を体系化・整理したいと言ったとき（「〇〇の知識を整理したい」「〇〇を深く理解したい」）
-  - ユーザーが「セマンティックツリー」「知識の木」「学習ノート」「幹と枝」「原理原則から学ぶ」などのキーワードを使ったとき
-  - ユーザーが特定のトピックの「基礎」「本質」「根本原理」を知りたいと言ったとき
-  - ユーザーが効率的な学習方法や学習計画を求めたとき
+  Semantic Tree Learning skill: accelerate learning a new topic by structuring knowledge as a semantic tree and creating a learning note in a Notion database.
+  Always use this skill in situations like:
+  - When the user wants to learn a new field or topic ("I want to learn X", "I want to study X", "I want to understand X")
+  - When the user wants to systematize or organize existing knowledge ("I want to organize my knowledge of X", "I want to understand X deeply")
+  - When the user uses keywords like "semantic tree", "tree of knowledge", "learning note", "trunk and branches", "learn from first principles"
+  - When the user wants to know the "fundamentals", "essence", or "root principles" of a specific topic
+  - When the user asks for an efficient learning method or a learning plan
 ---
 
-# Semantic Tree Learning スキル
+# Semantic Tree Learning skill
 
-## このスキルの目的
+## Purpose of this skill
 
-Elon Musk が提唱した「知識をセマンティックツリー（意味の木）として捉える」学習法に基づき、ユーザーの学習を加速するための構造化された学習ノートを作成する。
+Based on Elon Musk's learning method of "viewing knowledge as a semantic tree", create a structured learning note that accelerates the user's learning.
 
-核心となる考え方：
+The core idea:
 
 > "It is important to view knowledge as sort of a semantic tree — make sure you understand the fundamental principles, ie the trunk and big branches, before you get into the leaves/details or there is nothing for them to hang on to."
 > — Elon Musk
 
-葉（詳細な知識）は、幹（根本原理）と枝（主要な概念）がなければぶら下がる場所がない。だからこそ、まず幹を理解し、次に枝を理解し、最後に葉を学ぶ順序が重要になる。
+The leaves (detailed knowledge) have nothing to hang on to without the trunk (fundamental principles) and branches (main concepts). That is why the order matters: understand the trunk first, then the branches, and learn the leaves last.
 
-## ワークフロー
+## Workflow
 
-以下のステップを順番に実行する。各ステップでユーザーとの対話を大切にし、機械的に進めない。
+Run the following steps in order. Value the dialogue with the user at each step; do not proceed mechanically.
 
-### Step 1: トピックの理解と深掘り
+### Step 1: Understand and explore the topic
 
-ユーザーが学びたいトピックを聞いたら、まず以下を確認する：
+When you hear the topic the user wants to learn, first confirm the following:
 
-1. **学習の目的**: なぜそのトピックを学びたいのか？（仕事で使う、興味がある、試験対策など）
-2. **現在の知識レベル**: そのトピックについてどの程度知っているか？（全くの初心者、ある程度知っている、深めたいなど）
-3. **学習のゴール**: どのレベルまで理解したいか？（概要を掴みたい、実践で使えるレベル、専門家レベルなど）
+1. **Purpose of learning**: Why do they want to learn this topic? (use at work, personal interest, exam prep, etc.)
+2. **Current knowledge level**: How much do they already know about the topic? (complete beginner, somewhat familiar, want to deepen, etc.)
+3. **Learning goal**: To what level do they want to understand it? (grasp the overview, practical working level, expert level, etc.)
 
-これらの回答に応じて、以降のステップの深さや粒度を調整する。
+Adjust the depth and granularity of the later steps according to these answers.
 
-### Step 2: 情報収集とリサーチ
+### Step 2: Gather information and research
 
-WebSearch ツールを使って、トピックに関する信頼性の高い情報を集める。
+Use the WebSearch tool to collect reliable information about the topic.
 
-**注意**: WebSearch が利用できない、または検索結果が不十分な場合は、ユーザーに既に知っている情報源や参考資料を尋ねるか、一般的な知識から構造を提案してユーザーと対話しながら構築すること。
+**Note**: If WebSearch is unavailable or the search results are insufficient, ask the user for sources or references they already know, or propose a structure from general knowledge and build it through dialogue with the user.
 
-検索のポイント：
+Search tips:
 
-- トピック名 + "fundamentals" / "core concepts" / "principles" で基礎的な情報を検索
-- トピック名 + "beginner guide" / "introduction" で入門的な情報を検索
-- トピック名 + "cheat sheet" / "overview" で全体像を掴む情報を検索
-- 必要に応じて日本語でも検索する（トピック名 + "入門" / "基礎" / "原理"）
+- Search for foundational information with topic name + "fundamentals" / "core concepts" / "principles"
+- Search for introductory information with topic name + "beginner guide" / "introduction"
+- Search for big-picture information with topic name + "cheat sheet" / "overview"
+- Search in other languages as needed (e.g. the user's native language + "introduction" / "fundamentals" / "principles")
 
-集めた情報から、以下を特定する：
+From the collected information, identify the following:
 
-- そのトピックの **根本にある原理・原則**（これが「幹」になる）
-- 原理・原則を支える **主要な概念やカテゴリ**（これが「枝」になる）
-- 各概念の **具体的な詳細や応用例**（これが「葉」になる）
+- The **fundamental principles** at the root of the topic (these become the "trunk")
+- The **main concepts and categories** that support the principles (these become the "branches")
+- The **concrete details and applications** of each concept (these become the "leaves")
 
-### Step 3: セマンティックツリーの構築
+### Step 3: Build the semantic tree
 
-収集した情報をもとに、セマンティックツリーを構築する。
+Build the semantic tree based on the collected information.
 
-#### ツリーの構造
+#### Tree structure
 
 ```
- [トピック名]
+ [Topic name]
 │
 ├── Trunk: Fundamental Principles
-│   ├── 原理1: [説明]
-│   ├── 原理2: [説明]
-│   └── 原理3: [説明]
+│   ├── Principle 1: [explanation]
+│   ├── Principle 2: [explanation]
+│   └── Principle 3: [explanation]
 │
-├── Branch 1: [主要概念A]
-│   ├── 詳細1
-│   ├── 詳細2
-│   └── 詳細3
+├── Branch 1: [main concept A]
+│   ├── Detail 1
+│   ├── Detail 2
+│   └── Detail 3
 │
-├── Branch 2: [主要概念B]
-│   ├── 詳細1
-│   └── 詳細2
+├── Branch 2: [main concept B]
+│   ├── Detail 1
+│   └── Detail 2
 │
-└── Branch 3: [主要概念C]
-    ├── 詳細1
-    └── 詳細2
+└── Branch 3: [main concept C]
+    ├── Detail 1
+    └── Detail 2
 ```
 
-#### 幹の特定方法
+#### How to identify the trunk
 
-幹（根本原理）を特定するために、以下の問いかけを使う：
+To identify the trunk (fundamental principles), use the following questions:
 
-1. **「もしこの分野の知識を1つだけ残すとしたら何か？」** — 最も本質的な原理が見えてくる
-2. **「この分野の他の全ての知識は、何から派生しているか？」** — 知識の依存関係が見えてくる
-3. **「この分野の初学者が最初に理解すべきことは何か？」** — 学習の順序が見えてくる
-4. **「この原理がなかったら、この分野は成り立つか？」** — 原理の重要度が測れる
+1. **"If you could keep only one piece of knowledge from this field, what would it be?"** — reveals the most essential principle
+2. **"What is everything else in this field derived from?"** — reveals the dependency structure of the knowledge
+3. **"What should a beginner in this field understand first?"** — reveals the learning order
+4. **"Without this principle, would the field hold together?"** — measures how important the principle is
 
-幹として選ぶ原理は **3〜6個** に絞る。多すぎると構造が崩れるし、少なすぎると不十分になる。
+Narrow the trunk principles down to **3–6**. Too many and the structure collapses; too few and it is insufficient.
 
-### Step 4: ユーザーへの説明と確認
+### Step 4: Explain to the user and confirm
 
-ツリーを構築したら、まず会話の中でユーザーに説明する。
+Once the tree is built, first explain it to the user in the conversation.
 
-説明の際に心がけること：
+Keep these in mind while explaining:
 
-- **なぜそれが「幹」なのか** を丁寧に説明する（単に列挙するのではなく、その原理がなぜ根本的なのかを理由とともに伝える）
-- **身近なアナロジー（例え話）** を使って理解を助ける
-- **原理同士のつながり** を示す（独立した項目の羅列ではなく、関係性を見せる）
-- 必要に応じて **図やダイアグラム** をMermaidやASCIIアートで描く
+- Explain carefully **why something is the "trunk"** (don't just list items — convey why each principle is fundamental, with reasons)
+- Use **familiar analogies** to aid understanding
+- Show **the connections between principles** (show relationships rather than a flat list of independent items)
+- Draw **figures or diagrams** with Mermaid or ASCII art as needed
 
-ユーザーに以下を確認する：
+Confirm the following with the user:
 
-- この構造で理解しやすいか？
-- 追加で知りたい枝や葉はあるか？
-- 幹の部分で疑問に思うことはあるか？
+- Is this structure easy to understand?
+- Are there additional branches or leaves they want to know about?
+- Is there anything unclear about the trunk?
 
-### Step 5: Notion への学習ノート作成
+### Step 5: Create the learning note in Notion
 
-ユーザーが内容に満足したら、Notion の Knowledge データベースに学習ノートを作成する。
+Once the user is satisfied with the content, create a learning note in the Notion Knowledge database.
 
-#### Notion データベースの情報
+#### Notion database details
 
-**注意**: 以下のIDは環境固有の設定です。他の環境で使用する場合は、適切なデータソースIDとテンプレートIDに変更してください。
+**Note**: The IDs below are environment-specific settings. When using this in another environment, change them to the appropriate data source ID and template ID.
 
-- **データソースID**: `8288e3ed-6a64-4bc5-882c-04b78b775fc1`
-- **Cornell Note テンプレートID**: `289d4af9-764f-802f-a01a-db66b687f317`
+- **Data source ID**: `8288e3ed-6a64-4bc5-882c-04b78b775fc1`
+- **Cornell Note template ID**: `289d4af9-764f-802f-a01a-db66b687f317`
 
-**Notion API が利用できない場合**: ユーザーにマークダウン形式でノートを提供し、手動でNotionにコピーできるようにする、またはローカルファイルとして保存する選択肢を提示すること。
+**If the Notion API is unavailable**: provide the note to the user in markdown so they can copy it into Notion manually, or offer to save it as a local file.
 
-#### 作成するページのプロパティ
+#### Properties of the page to create
 
 ```json
 {
-  "Title": "[トピック名] - Semantic Tree",
-  "description": "セマンティックツリー学習法による [トピック名] の構造化ノート",
+  "Title": "[Topic name] - Semantic Tree",
+  "description": "Structured note on [topic name] using the semantic tree learning method",
   "Status": "in-progress",
-  "Tags": "[トピックに関連するタグを既存タグから選択、なければ新規作成]"
+  "Tags": "[select related tags from existing tags, or create new ones]"
 }
 ```
 
-#### ページコンテンツの構成
+#### Page content structure
 
-以下のテンプレートに沿ってコンテンツを作成する。内容は日本語で書く。
+Create the content following the template below.
 
 ```markdown
 # Goal
 
-[ユーザーがこのトピックを学ぶ目的・背景]
+[The user's purpose and background for learning this topic]
 
 # Trunk: Fundamental Principles
 
-この分野を理解するための最も重要な原理・原則。まずここを確実に理解することが、全ての学習の土台になる。
+The most important principles for understanding this field. Solidly understanding this first is the foundation for all learning.
 
-## Principle 1: [原理名]
+## Principle 1: [principle name]
 
-[原理の説明]
-[なぜこれが根本的なのか]
-[身近な例やアナロジー]
+[Explanation of the principle]
+[Why it is fundamental]
+[A familiar example or analogy]
 
-## Principle 2: [原理名]
+## Principle 2: [principle name]
 
-[同上]
+[same as above]
 
-## Principle 3: [原理名]
+## Principle 3: [principle name]
 
-[同上]
+[same as above]
 
 ---
 
 # Branch: Main concepts
 
-幹から派生する重要な概念群。幹を理解した上で、これらを学ぶことで実践的な知識が身につく。
+The key concepts derived from the trunk. After understanding the trunk, learning these builds practical knowledge.
 
-## [概念A]
+## [Concept A]
 
 ### Description
 
-[概念の説明]
+[Explanation of the concept]
 
 ### Connection with the trunk
 
-[この概念がどの原理から派生しているか]
+[Which principle this concept derives from]
 
 ### Key points
 
-- [詳細1]
-- [詳細2]
-- [詳細3]
+- [Detail 1]
+- [Detail 2]
+- [Detail 3]
 
-## [概念B]
+## [Concept B]
 
-[同上の構造]
+[same structure as above]
 
 ---
 
 # Leaf: Details/Applications
 
-枝から派生する具体的な知識。幹と枝を理解してからここに取り組むと効率的に吸収できる。
+Concrete knowledge derived from the branches. You absorb this efficiently once you understand the trunk and branches.
 
-## [詳細トピック1]
+## [Detail topic 1]
 
-[具体的な内容]
+[concrete content]
 
-## [詳細トピック2]
+## [Detail topic 2]
 
-[具体的な内容]
+[concrete content]
 
 ---
 
 # 🗺️ Roadmap
 
-推奨する学習順序：
+Recommended learning order:
 
-1. **Week 1**: [幹の原理を理解するための具体的なアクション]
-2. **Week 2**: [枝の概念を学ぶための具体的なアクション]
-3. **Week 3+**: [葉の詳細を深掘りするための具体的なアクション]
+1. **Week 1**: [concrete actions to understand the trunk principles]
+2. **Week 2**: [concrete actions to learn the branch concepts]
+3. **Week 3+**: [concrete actions to dig into the leaf details]
 
 # 📚 References
 
-- [リソース1]（URL）
-- [リソース2]（URL）
-- [リソース3]（URL）
+- [Resource 1] (URL)
+- [Resource 2] (URL)
+- [Resource 3] (URL)
 ```
 
-#### Related Knowledge の活用
+#### Using Related Knowledge
 
-既存の Knowledge データベースに関連するノートがある場合は、`Related Knowledge` プロパティで紐づける。これにより、知識同士のネットワークが構築され、セマンティックツリー間のつながりも可視化できる。
+If there are related notes in the existing Knowledge database, link them via the `Related Knowledge` property. This builds a network between pieces of knowledge and makes the connections between semantic trees visible too.
 
-関連ノートを探すには、Notion の search ツールを使って関連キーワードで検索する。
+To find related notes, use the Notion search tool to search by related keywords.
 
-### Step 6: フォローアップ
+### Step 6: Follow-up
 
-ノート作成後、ユーザーに以下を提案する：
+After creating the note, propose the following to the user:
 
-1. **深掘りの提案**: 「どの枝をもっと詳しく学びたいですか？追加のノートを作成できます」
-2. **関連分野の提案**: 「このトピックと関連が深い分野として〇〇があります。そちらのセマンティックツリーも作りましょうか？」
-3. **復習の仕組み**: 「1週間後にこのノートを見直して、理解度を確認するのがおすすめです」
+1. **Deeper dive**: "Which branch would you like to learn in more detail? I can create an additional note."
+2. **Related fields**: "A closely related field to this topic is X. Shall I build a semantic tree for that too?"
+3. **Review mechanism**: "I recommend revisiting this note in a week to check your understanding."
 
-## 重要な注意点
+## Important notes
 
-- **幹を特定することが最も重要なステップ**。ここを間違えると、後の学習全体の方向性がずれる。時間をかけて丁寧にリサーチし、ユーザーと確認すること。
-- **ユーザーの言葉で説明する**。専門用語を使う場合は必ず噛み砕いた説明を添える。
-- **完璧を目指さない**。セマンティックツリーは成長するもの。最初は幹と主要な枝だけでよく、後から葉を追加していける構造にする。
-- **既存の知識とつなげる**。ユーザーが既に知っていることと新しい知識を橋渡しすることで、理解と記憶の定着を促進する。
-- **柔軟に対応する**。WebSearchやNotion APIが利用できない場合でも、ユーザーとの対話や既存の知識を活用して学習ノートを作成できる。ツールに依存せず、本質的な価値（構造化された学習）を提供することを優先する。
+- **Identifying the trunk is the most important step.** Get it wrong and the direction of all subsequent learning is off. Research carefully, take your time, and confirm with the user.
+- **Explain in the user's own words.** Whenever you use technical terms, always add a plain-language explanation.
+- **Don't aim for perfection.** A semantic tree grows. Start with just the trunk and main branches; design it so you can add leaves later.
+- **Connect to existing knowledge.** Bridging what the user already knows with new knowledge promotes understanding and retention.
+- **Be flexible.** Even when WebSearch or the Notion API is unavailable, you can create a learning note by leveraging dialogue with the user and existing knowledge. Don't depend on tools — prioritize delivering the essential value: structured learning.
