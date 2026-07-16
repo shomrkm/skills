@@ -1,18 +1,11 @@
 ---
 name: dev-docs-writer
 description: >-
-  Use this skill whenever the user wants to write, draft, review, restructure, or polish
-  developer-facing technical documentation — README files, API references, design docs / ADRs,
-  tutorials, "Getting Started" guides, conceptual/architecture explanations, runbooks, PR
-  descriptions, or release notes. Based on the practical framework from the book "Docs for
-  Developers" (Bhatti, Corleissen, Lambourne, Nuñez, Waterhouse; Apress). Also use this skill to
-  detect and rewrite "AI slop" — generic, padded, template-sounding, generative-AI-flavored prose
-  (empty transitions, unearned claims, vague passive voice, no concrete examples) — even when the
-  user just says something like "この文章、AIっぽくて微妙" or "もっと具体的に書き直して" without
-  mentioning documentation explicitly. Trigger eagerly for requests like "READMEを書いて",
-  "このAPIのドキュメントをレビューして", "設計ドキュメントをわかりやすくして", "エンジニア向けに
-  ドキュメントをまとめたい", "オンボーディング資料を作って", or any request to create, structure,
-  or improve technical writing aimed at developers — English or Japanese, explicit or implied.
+  Use when writing or reviewing developer-facing technical documentation — README,
+  API reference, ADR / design doc, tutorial, runbook, PR description, release note.
+  Also use when detecting or rewriting "AI slop" — generic, padded, template-sounding
+  prose — even without an explicit docs framing ("この文章AIっぽい" /
+  "もっと具体的に書き直して"). Japanese or English.
 ---
 
 # 開発者向けドキュメント執筆スキル（Docs for Developers 準拠）
@@ -35,9 +28,16 @@ description: >-
 ## なぜこの順番でやるか
 
 技術文書が読みにくくなる最大の原因は、大抵「構成の問題」であって「文章力の問題」ではない。
-書き手は"curse of knowledge"（知っている側は、相手が何を知らないか想像しにくい）に陥りやすく、
-読者が本当に必要な情報より先に、書き手が説明したい順番で書いてしまう。そのため、書き始める前に
+書き手は **curse of knowledge**（知っている側は、相手が何を知らないか想像しにくい）に陥りやすく、
+読者が本当に必要な情報より先に、書き手が説明したい順で書いてしまう。だから書き始める前に
 「誰が」「何に困っていて」「ここで何を達成したいか」を明確にすることが、文章を整えることより先に来る。
+
+このスキルを貫く4つの leading word:
+
+- **curse of knowledge** — 書き手は自明性の錯覚に陥る。各工程で「これは自分にとってだけ自明ではないか」を自問する。
+- **friction log** — 実際に手を動かして詰まった箇所の時系列記録。ドキュメントで最も厚く書くべき場所を客観的に決める根拠。
+- **task-based** — 書き手が説明したい順ではなく、読者がタスクを行う順に情報を並べる（Stripe/Google流）。
+- **Single Source of Truth (SSoT)** — 同じ情報を複数箇所に書かない。1箇所に書いて他から参照する。
 
 ## コアワークフロー
 
@@ -46,17 +46,18 @@ description: >-
 
 ### Step 0: 読者と目的を明らかにする（Ch.1: Understanding your audience）
 
-書き始める前に、次を自分に（または依頼者に）問う。
+**curse of knowledge** に抗うため、書き始める前に次を自分に（または依頼者に）問う。
 
 - **誰が読むか**: 初めてこのプロダクトに触るエンジニアか、同じチームの人間か、半年後の自分か。
   読者の前提知識レベルによって、説明を省略していい範囲がまったく変わる。
-- **読者は今どこで詰まっているか**: 実際に手を動かして詰まったポイント（"friction log"）を
-  思い出す・洗い出す。詰まりやすい箇所こそドキュメントで一番厚く書くべき場所。
+- **読者は今どこで詰まっているか**: **friction log**（実際に手を動かして詰まったポイントの時系列記録）
+  を思い出す・洗い出す。friction log で厚く出た箇所が、ドキュメントで一番厚く書くべき場所。
 - **このドキュメントで何を達成したいか**: 「動かせるようになる」「なぜこの設計にしたか理解できる」
   「障害時に迷わず対応できる」など、読了後に読者が取れる行動を1文で言えるようにする。
 
-これが曖昧なまま書き始めると、後工程（構成・編集）でどれだけ手を入れても「誰のための文章か
-わからない」文書になる。不明な場合はユーザーに一言確認してから書き始める。
+**完了判定**: 上記3つを、自分の言葉で1文ずつ書き出せること。書き出せない項目が残る場合は、
+ユーザーに一言確認してから書き始める。曖昧なまま書き始めた文書は、後工程でどれだけ手を入れても
+「誰のための文章かわからない」まま残る。
 
 ### Step 1: ドキュメントタイプを選ぶ（Ch.2: Planning your documentation）
 
@@ -87,11 +88,15 @@ description: >-
 1. **内容パス**: 書いてあることは技術的に正しいか。抜けている手順・前提条件はないか。
    実際のコードや仕様で確認できない挙動（未実装の異常系、未検証のエッジケースなど）は、
    推測で埋めずに「未確認/TODO」と明記する。もっともらしい嘘のほうがAI slopより有害。
-2. **構成パス**: 読者が探す順番に情報が並んでいるか。見出しの粒度は揃っているか。
-3. **文章表現パス**: ここで `references/ai-slop-checklist.md` を使い、AI slop を機械的に潰す。
-   具体的には: 無意味な前置き・締めの削除、受動態→能動態、曖昧語→具体的な数値や固有名詞、
-   一般論→実例やコードへの置き換え、を1文ずつチェックする。
+2. **構成パス**: task-based に並んでいるか（読者が探す順 = 動かす→詰まる→概念に戻る）。
+   見出しの粒度は揃っているか。同じ情報が複数の見出しで重複していないか（SSoT違反）。
+3. **文章表現パス**: `references/ai-slop-checklist.md` を開き、**すべての段落**に対して
+   §8のセルフチェック5問を通す。1問でも「YES」が残る段落があれば、その段落を書き直す。
+   「YES」が残る段落がゼロになるまで抜けない。
 4. **仕上げパス**: 誤字脱字、リンク切れ、コードサンプルが実際に動くかの確認。
+
+**編集完了の判定**: 4パスすべてを通し、文章表現パスで「slopフラグの立つ段落がゼロ」であること。
+「だいたい潰した」で終わらない（curse of knowledge により、書き手には自分の slop が最も見えにくい）。
 
 他の人にレビューしてもらう場合は、「何を確認してほしいか」（技術的正確性か、わかりやすさか）を
 先に伝えると、もらえるフィードバックの質が上がる。
@@ -104,39 +109,28 @@ description: >-
   示すときだけ使う。スクリーンショットはUIが変わるとすぐ陳腐化するので最小限に留め、
   使う場合は「何を見てほしいか」をキャプションで明示する。
 
-### Step 5: 公開・保守を意識した締め（Ch.7–11, 社内文書向けの軽量版）
+### Step 5: 保守を意識した締め（Ch.7–11, 社内文書向けの軽量版）
 
-社内ドキュメントでは、書籍が扱う本格的な公開プロセスをフルに適用する必要はない。実務上は:
-
-- ドキュメントを更新すべきタイミング（関連コードの変更時など）をコメントやPRテンプレートに
-  ひとこと書いておくと、陳腐化を防ぎやすい。
-- 「これは誰が読んでも同じ結論にたどり着けるか」を最後に自問する。曖昧なら具体例を足す。
-- 明らかに古くなった記述は、残すより削除・更新するほうが読者のためになる。
+社内ドキュメントで実務的に守るべきは1点だけ: **SSoT を破らない**。
+同じ事実を複数箇所に書いた瞬間、片方が古くなり、読者はどちらを信じるべきか迷う。
+「なぜ」は概念ドキュメント、「どう呼ぶか」はAPIリファレンス、「動かす手順」はREADMEに1箇所ずつ書き、
+他所からは参照する。書籍のCh.7-11（公開プロセス、品質指標、廃止フロー）の詳細は
+`references/framework.md` を参照。
 
 ## AI slop を避ける（このスキルの核）
 
-生成AIが書く文章は、次のパターンで「それっぽいが中身が薄い」文章になりがちである。
-編集パス（Step 3）で必ずこのチェックリストを通す。詳しいNG/OK例は
-`references/ai-slop-checklist.md` にまとめてあるので、実際に書き直すときはそちらを開くこと。
+AI slop の**具体的なNG/OK対比とセルフチェック質問**は `references/ai-slop-checklist.md` に
+一元化してある（SSoT）。本体で覚えておくべきは1点だけ:
 
-- **無意味な前置き・締めを削る**: 「このドキュメントでは〇〇について説明します」で始めて
-  「以上、〇〇について説明しました」で終わる構造は情報量ゼロ。読者が探している情報から始める。
-- **具体性のない一般論を避ける**: 「重要な役割を果たしています」「様々な場面で活用されています」
-  のような、何にでも当てはまる文は削るか、具体的な事実・数値・コード例に置き換える。
-- **受動態・曖昧な主語を避ける**: 「変更されることがあります」ではなく「デプロイ時にCIが
-  上書きします」のように、誰が/何がその動作を行うかを明示する。
-- **根拠のない誇張を避ける**: 「パフォーマンスが大幅に向上」ではなく「レスポンスタイムが
-  850msから120msに短縮」のように測定可能な事実で語る。測れないなら誇張せず書かない。
-- **テンプレ的なレトリックを避ける**: 「これは単なる〇〇ではなく、△△です」型の対比、
-  問いかけてから自分で答える見せかけのフック、といった定型パターンは使わない。直接説明する。
-- **読者の目的から逆算した構成にする**: 書き手が説明したい順ではなく、読者がその情報を
-  必要とするタイミングの順に並べる（Stripe/Google流のtask-basedな構成）。
+**編集の文章表現パス（Step 3.3）では、すべての段落を ai-slop-checklist.md §8 の5問に通す**。
+1問でも「YES」が残る段落があれば、その段落は slop なので書き直す。「だいたい潰した」で
+終わらないこと（curse of knowledge により、書き手には自分の slop が最も見えにくい）。
 
 ## 参照ファイル
 
-- `references/framework.md` — Docs for Developersの各章の要点（読者分析・友摩ログ、
+- `references/framework.md` — Docs for Developersの各章の要点（読者分析・friction log、
   ドキュメントタイプの使い分け、ドラフティング/編集の具体的な進め方、コードサンプル・図表の原則、
-  公開・フィードバック・品質測定・整理・保守の考え方）。章立てを詳しく知りたい/根拠を確認したい時に読む。
+  公開・保守の考え方）。章立てを詳しく知りたい/根拠を確認したい時に読む。
 - `references/ai-slop-checklist.md` — AI slopのNG例とOK例の対比集。文章を書き直す作業に入ったら
   必ず開く。
 - `references/templates.md` — README / API リファレンス / チュートリアル / 概念ドキュメント /
