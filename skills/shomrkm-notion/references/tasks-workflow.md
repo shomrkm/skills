@@ -164,3 +164,34 @@ AskUserQuestion で確認:
   - completed_at: 2026-05-11
   - URL: https://www.notion.so/...
 ```
+
+## 8. Projects DB のページ本文構造
+
+Projects DB の各ページは以下のテンプレート構造を持つ。**セクションごとに書き手が決まっている**ので、書き込み時は担当セクション以外に触らないこと。
+
+| セクション | 書き手 | 内容 |
+|---|---|---|
+| `## Progress Summary` | AI (自動更新) | 進捗の集約サマリ。全置換してよい唯一のセクション |
+| `## As-Is` | 人間 | 現状認識 |
+| `## To-Be` | 人間 | 目指す状態 |
+| `## ToDos` | inline database | Tasks DB のビュー。直接編集しない |
+| `## References` | 人間 / AI | 参考リンク。追記のみ |
+
+各見出しの直下に区切り線 `---` がある。
+
+### Progress Summary の更新手順
+
+`## Progress Summary` の `---` の直後から、次の見出し `## As-Is` の直前までを**全置換**する。
+
+1. `mcp__notion__notion-fetch` でページ本文を取得
+2. `## Progress Summary` と `## As-Is` の間を、新しい内容で差し替え
+3. `mcp__notion__notion-update-page` で本文を更新
+
+追記ではなく置換にする理由: サマリは最新状態のみを保持すべきで、履歴を溜めると肥大化して読まれなくなる。
+
+### 避けるべき間違い
+
+- ❌ `As-Is` / `To-Be` / `ToDos` を書き換える (人間の領域)
+- ❌ Progress Summary に追記する (全置換が正しい)
+- ❌ セクション見出しや `---` を消す (テンプレ構造を壊す)
+- ❌ ページ本文を丸ごと置換する (他セクションが消える)

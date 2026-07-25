@@ -53,6 +53,7 @@ shomrkm の Notion ワークスペース専用の操作スキル。GTD ベース
 | タスク追加 / 明日 / Today / Next Actions / Wait for / Someday / TODO | `references/tasks-workflow.md` | Tasks DB |
 | タスクを完了 / Closed に / Archive | `references/tasks-workflow.md` | Tasks DB |
 | プロジェクト作成 / Project 追加 / プロジェクト化 | `references/tasks-workflow.md` | Projects DB |
+| Project ページの本文を読む・書く / Progress Summary 更新 | `references/tasks-workflow.md` | Projects DB |
 | Daily Log / 今日の振り返り / 学んだこと記録 | `references/lifelog-workflow.md` | LifeLog |
 | 週次レビュー / 今週の振り返り | `references/review-workflow.md` | [GTD] Reveiw DB |
 | Knowledge にまとめる / ナレッジ化 / Cornell Note | `references/knowledge-workflow.md` | Knowledge |
