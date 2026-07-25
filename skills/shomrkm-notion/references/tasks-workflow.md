@@ -181,17 +181,49 @@ Projects DB の各ページは以下のテンプレート構造を持つ。**セ
 
 ### Progress Summary の更新手順
 
-`## Progress Summary` の `---` の直後から、次の見出し `## As-Is` の直前までを**全置換**する。
+`mcp__notion__notion-update-page` の `update_content` を使い、サマリ本文だけを差し替える。
 
-1. `mcp__notion__notion-fetch` でページ本文を取得
-2. `## Progress Summary` と `## As-Is` の間を、新しい内容で差し替え
-3. `mcp__notion__notion-update-page` で本文を更新
+**サマリ本文は必ず `> 🤖 自動更新: <YYYY-MM-DD>` の引用行から始める。** この行が置換のアンカーになる。
+
+#### 初回 (Progress Summary が空のとき)
+
+空セクションは空行ではなく `<empty-block/>` なので、`## Progress Summary\n---\n\n## As-Is` のような文字列はマッチしない。**次のセクションの見出し行をアンカーにして、その手前に挿入する。**
+
+```jsonc
+{
+  "command": "update_content",
+  "content_updates": [{
+    "old_str": "## As-Is\n---\n- (As-Is の最初の1行をそのまま書く)",
+    "new_str": "> 🤖 自動更新: 2026-07-25\n\n**進捗**: ...\n\n## As-Is\n---\n- (同じ1行)"
+  }]
+}
+```
+
+As-Is が空の Project では代わりに `## Progress Summary\n---` をアンカーにし、その直後に挿入する。
+
+#### 2回目以降 (既にサマリがあるとき)
+
+`> 🤖 自動更新:` から最後の行までを丸ごと `old_str` に入れて差し替える。これで重複せず内容だけが入れ替わる (冪等)。
+
+```jsonc
+{
+  "command": "update_content",
+  "content_updates": [{
+    "old_str": "> 🤖 自動更新: 2026-07-25\n**進捗**: ...(既存のサマリ全文)",
+    "new_str": "> 🤖 自動更新: 2026-08-01\n**進捗**: ...(新しいサマリ全文)"
+  }]
+}
+```
+
+**必ず `notion-fetch` で現在の本文を取得してから `old_str` を組み立てる。** 記憶や前回の書き込み内容から組み立てると、実際の本文と1文字でも違えばマッチせず失敗する。
 
 追記ではなく置換にする理由: サマリは最新状態のみを保持すべきで、履歴を溜めると肥大化して読まれなくなる。
 
 ### 避けるべき間違い
 
 - ❌ `As-Is` / `To-Be` / `ToDos` を書き換える (人間の領域)
-- ❌ Progress Summary に追記する (全置換が正しい)
+- ❌ Progress Summary に追記する (全置換が正しい。追記すると実行のたびにサマリが積み上がる)
 - ❌ セクション見出しや `---` を消す (テンプレ構造を壊す)
-- ❌ ページ本文を丸ごと置換する (他セクションが消える)
+- ❌ ページ本文を丸ごと置換する (`replace_content` は使わない。他セクションが消える)
+- ❌ `## Progress Summary\n---\n\n## As-Is` をアンカーにする (空セクションは `<empty-block/>` でマッチしない)
+- ❌ fetch せずに `old_str` を組み立てる (実際の本文と一致しないと失敗する)
