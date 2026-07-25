@@ -130,14 +130,68 @@ Projects In Progress view → `progress` rollup の値を見せる
 
 LifeLog の table view から Date 範囲フィルタ
 
-## 6. 避けるべき間違い
+## 6. SQL クエリ (query-data-sources) の落とし穴
+
+`mcp__notion__notion-query-data-sources` の SQL モードには、Notion のプロパティ型に由来する制約がある。
+
+### rollup と formula は SQL から読めない
+
+**計算列 (rollup / formula) は SQL バックエンドに公開されていない。** SELECT すると `no such column` エラーになる。
+
+| 読めない列 | 型 | 代替手段 |
+|---|---|---|
+| Projects の `progress` | rollup | Tasks 側から `task_type` を数えて自前で集計する |
+| Tasks の `is_completed` | formula | `task_type = 'Completed'` で判定する |
+| Tasks の `is_delayed` | formula | `date:due_date:start` と今日を比較する |
+
+**確認方法**: `SELECT * FROM "collection://..." LIMIT 1` を実行すると、SQL から見える列だけが返る。ここに無い列は SELECT できない。推測でクエリを書く前にこれで確認する。
+
+### 日付列は expanded name で指定する
+
+`due_date` ではなく `date:due_date:start` を使う。書き込み時と同じ規則。
+
+```sql
+SELECT "Name", "date:due_date:start" AS due
+FROM "collection://b2b78cf4-0ad7-4bba-bfde-3f2691b3be25"
+WHERE "date:due_date:start" < '2026-07-25'
+```
+
+### スペースを含む列名はクォートする
+
+` is_archived` (先頭スペース) や `working date` は必ずダブルクォートで囲む。
+
+```sql
+WHERE " is_archived" = '__NO__'
+```
+
+### checkbox は文字列で比較する
+
+`true` / `false` ではなく `'__YES__'` / `'__NO__'`。
+
+### 完了タスクは archive されている (集計時の最重要ポイント)
+
+運用上、`task_type = 'Completed'` のタスクはほぼすべて ` is_archived = '__YES__'` になっている (実測: Completed 1654件がすべて archived、非 archived の Completed は 0件)。
+
+つまり **` is_archived = '__NO__'` で絞ると、完了タスクが1件も取れない。**
+
+| やりたいこと | フィルタ |
+|---|---|
+| 未完了タスクの一覧 | ` is_archived = '__NO__'` |
+| 完了数を含む集計 | **archive で絞らない**。`task_type` で振り分ける |
+| 特定期間の完了タスク | archive で絞らず `date:completed_at:start` の範囲で絞る |
+
+進捗率 (完了 N / 全 M) を出すときに archive で絞ると、分子が必ず 0 になる。
+
+## 7. 避けるべき間違い
 
 - ❌ 大量に結果を返す (デフォルト Top 10 程度に絞る)
 - ❌ 全プロパティをダンプする (Name, status, due_date など主要なものだけ)
 - ❌ user に URL を渡し忘れる (各行に Notion URL を含める)
 - ❌ query-database-view の view_url を間違える (`v=` の後の id を databases.md で正確に確認)
+- ❌ rollup / formula を SELECT する (`progress`, `is_completed`, `is_delayed` は読めない)
+- ❌ 日付を生の列名で SELECT する (`due_date` ではなく `date:due_date:start`)
 
-## 7. 出力フォーマット例
+## 8. 出力フォーマット例
 
 ```
 今日のタスク (task_type=Today, 4件):

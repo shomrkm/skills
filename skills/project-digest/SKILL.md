@@ -53,6 +53,11 @@ GTD の Project の状況を集約し、進捗サマリと次の一手の提案�
 必要な情報:
 - アクティブな Project 一覧 (`status` が `in-progress` / `planning` / `Not started`)
 - 各 Project に紐づくタスク (`task_type`, `due_date`, `completed_at`)
+
+タスク取得時の注意 (詳細は `shomrkm-notion` の query-patterns.md):
+
+- 完了数は `task_type = 'Completed'` を数えて求める。`progress` (rollup) と `is_completed` (formula) は SQL から読めない
+- **archive で絞り込まない。** 完了タスクは archive されるため、`is_archived = '__NO__'` で絞ると完了数が必ず 0 になる
 - 各 Project ページ本文の `## As-Is` と `## To-Be`
 
 アクティブ Project が 0 件なら、何もせず終了する (Slack にも投稿しない)。
