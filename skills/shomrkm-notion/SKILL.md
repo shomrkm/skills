@@ -20,6 +20,23 @@ shomrkm の Notion ワークスペース専用の操作スキル。GTD ベース
 - 「今日のタスクは？」「進行中のプロジェクトは？」「最近の Knowledge」
 - 「Notion に書いて」「Notion から探して」
 
+## 最初に: 実行モードを判定する
+
+**Notion を触る前に、環境変数 `SHOMRKM_NOTION_USE_API` を確認する。**
+
+```bash
+[ "${SHOMRKM_NOTION_USE_API:-}" = "true" ] && echo "API" || echo "MCP"
+```
+
+| 値 | 使う経路 |
+|---|---|
+| `true` | **REST API**。`references/api-mode.md` を Read して `scripts/notion_api.py` を使う |
+| 未設定 / その他 | **Notion MCP**。以下の手順どおり |
+
+会社 PC では MCP が会社のワークスペースに接続されており、個人の Notion を読み書きできない。その環境で `SHOMRKM_NOTION_USE_API=true` を設定して API 経由に切り替える。
+
+DB ID・プロパティ名・GTD の運用ルールは**どちらのモードでも共通**で、`references/databases.md` が正。
+
 ## コア原則
 
 **1. 推測しない。不明点は AskUserQuestion で必ず確認する。**
@@ -60,6 +77,7 @@ shomrkm の Notion ワークスペース専用の操作スキル。GTD ベース
 | 読んだ記事 / Links に追加 / 後で読む / URL を保存 | `references/reading-workflow.md` | Links |
 | 本を追加 / 読書記録 / 読了 | `references/reading-workflow.md` | Books |
 | 今日のタスクは / 未読は / 進行中のプロジェクトは / 最近の〜 | `references/query-patterns.md` | 横断 |
+| (`SHOMRKM_NOTION_USE_API=true` のとき、上記すべて) | `references/api-mode.md` | 横断 |
 
 不明な場合は `references/databases.md` を Read して全体像を確認してから判断する。
 
