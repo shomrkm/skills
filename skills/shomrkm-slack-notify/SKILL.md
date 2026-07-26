@@ -13,12 +13,47 @@ shomrkm の個人 Slack ワークスペースの通知チャンネルへの投�
 
 **このスキルがやらないこと**: 通知する中身を作ること。何を通知すべきかは呼び出し側が決める。
 
-## 投稿先
+## 送信方法
+
+**Slack MCP は使わない。Bot Token で Web API を直接叩く。**
+
+理由: MCP のツール名は実行環境によって変わり (対話セッションとヘッドレス実行で別名になる)、さらにどのワークスペースに接続されるか制御できない。実際に個人ではなく別ワークスペースに繋がり `channel_not_found` で失敗した。Bot Token なら token を発行したワークスペースに必ず届く。
 
 | 項目 | 値 |
 |---|---|
 | チャンネル ID | `C05C6SS2KJA` |
-| ツール | `mcp__plugin_slack_slack__slack_send_message` |
+| Bot | `shomrkm-ai` (個人ワークスペース `shomrkm`) |
+| token | 環境変数 `SLACK_BOT_TOKEN` |
+| API | `https://slack.com/api/chat.postMessage` |
+
+token はローカルでは `~/.claude/.env` (chmod 600) に置き、スクリプト側で読み込んで export する。launchd は `.zshrc` を読まないため、シェルの設定に書いても無人実行には届かない。他環境や CI では `SLACK_BOT_TOKEN` を直接設定すればよい。
+
+### 送信コマンド
+
+```bash
+curl -sS -X POST https://slack.com/api/chat.postMessage \
+  -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d @- <<'JSON'
+{"channel":"C05C6SS2KJA","text":"ここに本文","unfurl_links":false}
+JSON
+```
+
+本文には改行やクォートが入るため、`-d @-` + ヒアドキュメントで渡す。シェルの引数に直接埋め込むとエスケープが壊れる。
+
+### 送信後は必ず結果を確認する
+
+**Slack API は失敗しても HTTP 200 を返す。** レスポンス JSON の `ok` を見ること。
+
+| `error` | 意味と対処 |
+|---|---|
+| (`"ok":true`) | 成功 |
+| `not_in_channel` | Bot が招待されていない。チャンネルで `/invite @shomrkm-ai` |
+| `channel_not_found` | チャンネル ID が違うか、token が別ワークスペースのもの |
+| `invalid_auth` / `token_revoked` | token が無効。再発行が必要 |
+| `missing_scope` | Bot Token Scopes に `chat:write` がない |
+
+`SLACK_BOT_TOKEN` が未設定の場合は、**エラーで落とさず「通知をスキップした」と報告して終了する**。呼び出し元の処理 (Notion の更新など) は既に完了しているため。
 
 ## 投稿ルール
 
@@ -69,6 +104,9 @@ shomrkm の個人 Slack ワークスペースの通知チャンネルへの投�
 
 ## 避けるべき間違い
 
+- ❌ Slack MCP のツールを使う (環境依存で別ワークスペースに飛ぶ。token 方式に統一する)
+- ❌ token をスキルやスクリプトに直書きする (`$SLACK_BOT_TOKEN` を参照する)
+- ❌ レスポンスの `ok` を確認せず成功とみなす (失敗しても HTTP 200 が返る)
 - ❌ 対象ごとに複数投稿する (1実行1投稿)
 - ❌ Notion に書いた内容を Slack にも全文コピーする (Slack は索引)
 - ❌ 失敗を黙って終了する (エラーこそ通知する)
