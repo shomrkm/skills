@@ -199,12 +199,16 @@ def flatten(prop):
 
 
 def simplify(page):
-    props = {k: flatten(v) for k, v in page.get("properties", {}).items()}
-    return {
-        "id": page.get("id"),
-        "url": page.get("url"),
-        "properties": {k: v for k, v in props.items() if v not in (None, [], "")},
-    }
+    props = {}
+    for name, prop in page.get("properties", {}).items():
+        if not name.strip():
+            continue  # 名前が空のプロパティは Notion 上のゴミなので落とす
+        value = flatten(prop)
+        # False や 0 は意味のある値なので None/空だけを落とす
+        if value is None or value == [] or value == "":
+            continue
+        props[name] = value
+    return {"id": page.get("id"), "url": page.get("url"), "properties": props}
 
 
 def blocks_to_markdown(blocks, depth=0):
