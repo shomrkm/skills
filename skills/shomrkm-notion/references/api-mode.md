@@ -29,13 +29,17 @@
 3. Capabilities: Read content / Update content / Insert content にチェック
 4. Internal Integration Secret (`ntn_` で始まる) をコピー
 
-### 2. token を環境変数に置く
+### 2. token を `~/.claude/.env` に置く
 
 ```bash
 # ~/.claude/.env (chmod 600)
 NOTION_TOKEN=ntn_...
 SHOMRKM_NOTION_USE_API=true
 ```
+
+**`settings.json` の `env` には書かないこと。** 設定ファイルは人に見せたり issue に貼ったりする機会が多く、token が混ざっていると漏れやすい。`.env` は token 専用のファイルとして分けておく。
+
+`scripts/notion_api.py` は起動時にこのファイルを自動で読む (Claude Code の Bash ツールは `.env` を自動では読み込まないため)。既に同名の環境変数がある場合はそちらが優先されるので、CI や他環境では環境変数を直接設定すればよい。
 
 ### 3. 各 DB に Integration を接続する ★忘れやすい
 

@@ -48,9 +48,36 @@ DATA_SOURCES = {
 }
 
 
+ENV_FILE = os.path.expanduser("~/.claude/.env")
+
+
 def die(msg, code=1):
     print(f"エラー: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def load_env_file(path=ENV_FILE):
+    """~/.claude/.env を読んで環境変数に入れる。
+
+    Claude Code の Bash ツールはこのファイルを自動では読まないため、
+    スクリプト側で読む。既に環境変数がある場合はそちらを優先するので、
+    CI や他環境では環境変数を直接設定すればよい。
+    """
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                # 既存の環境変数を上書きしない (明示的な指定を優先する)
+                if key and key not in os.environ:
+                    os.environ[key] = value.strip().strip("'\"")
+    except OSError:
+        pass  # 読めなくても環境変数が設定されていれば動く
 
 
 def token():
@@ -59,7 +86,8 @@ def token():
         die(
             "NOTION_TOKEN が未設定です。\n"
             "  https://www.notion.so/my-integrations で Integration を作り、\n"
-            "  ~/.claude/.env に NOTION_TOKEN=ntn_... を設定してください。"
+            f"  {ENV_FILE} に NOTION_TOKEN=ntn_... を設定してください\n"
+            "  (または環境変数 NOTION_TOKEN を直接設定してください)。"
         )
     return t
 
@@ -398,6 +426,7 @@ def main():
     u.set_defaults(func=cmd_update)
 
     args = p.parse_args()
+    load_env_file()
     args.func(args)
 
 
