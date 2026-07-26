@@ -18,7 +18,13 @@ shomrkm の個人 Slack ワークスペースの通知チャンネルへの投�
 | 項目 | 値 |
 |---|---|
 | チャンネル ID | `C05C6SS2KJA` |
-| ツール | `mcp__plugin_slack_slack__slack_send_message` |
+| ツール | Slack MCP の「メッセージ送信」ツール (下記) |
+
+**ツール名は実行環境によって変わる。** 対話セッションでは `mcp__plugin_slack_slack__slack_send_message`、ヘッドレス実行 (`claude -p`) では `mcp__slack__send_message` のように、同じ機能が別名で登録される。
+
+**名前を決め打ちせず、実行時に利用可能なツールから「Slack にメッセージを送信するもの」を選ぶこと。** 見つからない場合は Slack MCP が未接続なので、通知せずその旨を報告して終了する (エラーで落とさない)。
+
+チャンネル ID `C05C6SS2KJA` は環境によらず同じ。
 
 ## 投稿ルール
 
