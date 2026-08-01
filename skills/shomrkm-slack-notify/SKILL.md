@@ -26,17 +26,13 @@ shomrkm の個人 Slack ワークスペースの通知チャンネルへの投�
 | token | 環境変数 `SLACK_BOT_TOKEN` |
 | API | `https://slack.com/api/chat.postMessage` |
 
-token は `~/.claude/.env` (chmod 600) に置く。`settings.json` の `env` には書かない — 設定ファイルは人に見せる機会が多く、token が混ざると漏れやすい。
+token は `~/.zshrc` に `export SLACK_BOT_TOKEN=xoxb-...` として置く (`chmod 600` を推奨)。`settings.json` の `env` には書かない — 設定ファイルは人に見せる機会が多く、token が混ざると漏れやすい。
 
-**Claude Code の Bash ツールは `.env` を自動では読まない。** そのため送信コマンドの冒頭で毎回読み込む (下記)。launchd も `.zshrc` を読まないため、無人実行でも同じ形でよい。他環境や CI では `SLACK_BOT_TOKEN` を直接設定すればそちらが使われる。
+対話セッションからは環境変数として見える。ただし **launchd は `.zshrc` を読まない**ため、無人実行するスクリプトでは冒頭で読み込む必要がある。
 
 ### 送信コマンド
 
-先頭の `.` (source) を省略しないこと。省略すると token が空のまま送られ `invalid_auth` になる。
-
 ```bash
-[ -f ~/.claude/.env ] && set -a && . ~/.claude/.env && set +a
-
 curl -sS -X POST https://slack.com/api/chat.postMessage \
   -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
   -H "Content-Type: application/json; charset=utf-8" \

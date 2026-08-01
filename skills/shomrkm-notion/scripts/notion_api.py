@@ -26,6 +26,7 @@ Notion の内部表現を知る必要はない。
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -48,7 +49,10 @@ DATA_SOURCES = {
 }
 
 
-ENV_FILE = os.path.expanduser("~/.claude/.env")
+RC_FILE = os.path.expanduser("~/.zshrc")
+
+# このスクリプトが参照する環境変数。.zshrc から拾う対象でもある。
+WANTED_VARS = ("NOTION_TOKEN", "SHOMRKM_NOTION_USE_API")
 
 
 def die(msg, code=1):
@@ -56,26 +60,34 @@ def die(msg, code=1):
     sys.exit(code)
 
 
-def load_env_file(path=ENV_FILE):
-    """~/.claude/.env を読んで環境変数に入れる。
+def load_from_rc(path=RC_FILE):
+    """環境変数が未設定なら ~/.zshrc の export 行から拾う。
 
-    Claude Code の Bash ツールはこのファイルを自動では読まないため、
-    スクリプト側で読む。既に環境変数がある場合はそちらを優先するので、
-    CI や他環境では環境変数を直接設定すればよい。
+    通常は .zshrc が読まれた環境から呼ばれるので何もしない。これは
+    launchd のような非対話・非ログインシェル (.zshrc が読まれない) から
+    起動された場合のフォールバック。
+
+    .zshrc を実行はせず、単純な `export KEY=VALUE` 行だけを読む。
+    実行すると副作用があり、コマンド置換を含む行も危険なため。
     """
+    if all(os.environ.get(v) for v in WANTED_VARS):
+        return  # 既に揃っているので読む必要がない
     if not os.path.isfile(path):
         return
+    pattern = re.compile(
+        r'^\s*export\s+(' + "|".join(WANTED_VARS) + r')=(.*)$')
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
+                m = pattern.match(line)
+                if not m:
                     continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                # 既存の環境変数を上書きしない (明示的な指定を優先する)
-                if key and key not in os.environ:
-                    os.environ[key] = value.strip().strip("'\"")
+                key, raw = m.group(1), m.group(2).strip()
+                # コマンド置換や変数展開を含む行は評価できないので飛ばす
+                if any(c in raw for c in ("$", "`")):
+                    continue
+                if key not in os.environ:
+                    os.environ[key] = raw.strip("'\"")
     except OSError:
         pass  # 読めなくても環境変数が設定されていれば動く
 
@@ -86,8 +98,8 @@ def token():
         die(
             "NOTION_TOKEN が未設定です。\n"
             "  https://www.notion.so/my-integrations で Integration を作り、\n"
-            f"  {ENV_FILE} に NOTION_TOKEN=ntn_... を設定してください\n"
-            "  (または環境変数 NOTION_TOKEN を直接設定してください)。"
+            f"  {RC_FILE} に export NOTION_TOKEN=ntn_... を追記してください\n"
+            "  (追記後は新しいシェルを開くか source ~/.zshrc が必要です)。"
         )
     return t
 
@@ -426,7 +438,7 @@ def main():
     u.set_defaults(func=cmd_update)
 
     args = p.parse_args()
-    load_env_file()
+    load_from_rc()
     args.func(args)
 
 
