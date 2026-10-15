@@ -29,13 +29,25 @@
 3. Capabilities: Read content / Update content / Insert content にチェック
 4. Internal Integration Secret (`ntn_` で始まる) をコピー
 
-### 2. token を環境変数に置く
+### 2. token を `~/.zshrc` に置く
 
 ```bash
-# ~/.claude/.env (chmod 600)
-NOTION_TOKEN=ntn_...
-SHOMRKM_NOTION_USE_API=true
+# ~/.zshrc
+export NOTION_TOKEN=ntn_...
+export SHOMRKM_NOTION_USE_API=true   # 会社 PC のみ。個人 Mac には書かない
 ```
+
+追記したら `source ~/.zshrc` するか、新しいシェルを開く。
+
+`~/.zshrc` には token が入るので権限を絞る:
+
+```bash
+chmod 600 ~/.zshrc
+```
+
+**`settings.json` の `env` には書かないこと。** 設定ファイルは人に見せたり issue に貼ったりする機会が多く、token が混ざっていると漏れやすい。
+
+`scripts/notion_api.py` は環境変数を参照する。環境変数が未設定のときだけ `~/.zshrc` の `export` 行から拾うフォールバックを持つ (launchd のような非対話・非ログインシェルは `.zshrc` を読まないため)。`.zshrc` は実行せず単純な `export KEY=VALUE` 行だけを読むので、副作用はない。
 
 ### 3. 各 DB に Integration を接続する ★忘れやすい
 

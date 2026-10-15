@@ -26,7 +26,9 @@ shomrkm の個人 Slack ワークスペースの通知チャンネルへの投�
 | token | 環境変数 `SLACK_BOT_TOKEN` |
 | API | `https://slack.com/api/chat.postMessage` |
 
-token はローカルでは `~/.claude/.env` (chmod 600) に置き、スクリプト側で読み込んで export する。launchd は `.zshrc` を読まないため、シェルの設定に書いても無人実行には届かない。他環境や CI では `SLACK_BOT_TOKEN` を直接設定すればよい。
+token は `~/.zshrc` に `export SLACK_BOT_TOKEN=xoxb-...` として置く (`chmod 600` を推奨)。`settings.json` の `env` には書かない — 設定ファイルは人に見せる機会が多く、token が混ざると漏れやすい。
+
+対話セッションからは環境変数として見える。ただし **launchd は `.zshrc` を読まない**ため、無人実行するスクリプトでは冒頭で読み込む必要がある。
 
 ### 送信コマンド
 
