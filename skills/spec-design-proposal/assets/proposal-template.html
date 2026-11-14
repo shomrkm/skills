@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- タイトルは2〜4語の名前にする (例: 一括評価入力の検討) -->
+<title>評価入力の検討</title>
+<!--
+  使い方:
+  - {{ }} と「例:」の中身を、検討内容に置き換える。サンプル (評価入力の例) は丸ごと消してよい
+  - モックは .sui-frame の中で assets/smarthr-ui-like.css のクラスを使う
+  - 仕上げに scripts/inline_css.py で下の SUI_CSS マーカーを CSS 本体に置き換える
+-->
+<!-- SUI_CSS -->
+<style>
+  /* ---- ページ自体のトークン (モックの外側) ---- */
+  :root {
+    --bg: #f8f7f6;
+    --surface: #ffffff;
+    --surface-2: #f2f1f0;
+    --text: #23221e;
+    --text-sub: #706d65;
+    --line: #d6d3d0;
+    --accent: #0077c7;
+    --accent-soft: #e5f1fa;
+    --good: #0f7f85;
+    --bad: #e01e5a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1b1a18; --surface: #252421; --surface-2: #2e2d29; --text: #f2f1f0; --text-sub: #b3afa8;
+      --line: #45433e; --accent: #4fa8e8; --accent-soft: #1d3446; --good: #4fc1c7; --bad: #f26b93;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1b1a18; --surface: #252421; --surface-2: #2e2d29; --text: #f2f1f0; --text-sub: #b3afa8;
+    --line: #45433e; --accent: #4fa8e8; --accent-soft: #1d3446; --good: #4fc1c7; --bad: #f26b93;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, sans-serif; font-size: 16px; line-height: 1.7;
+  }
+  .doc { max-width: 1040px; margin: 0 auto; padding: 40px 16px 80px; }
+  /* 見出し・段落のスタイルはモック (.sui-frame) に漏れないよう直下の子に限定する */
+  .doc > header h1 { font-size: 1.75rem; line-height: 1.3; margin: 0 0 8px; }
+  .doc > h2 { font-size: 1.25rem; margin: 56px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .doc > h3, .option > h3 { font-size: 1.05rem; margin: 24px 0 8px; }
+  .doc > p, .option > p, .doc > header p { margin: 0 0 12px; }
+  .meta { color: var(--text-sub); font-size: .875rem; }
+  .summary { display: grid; gap: 12px; margin: 24px 0 0; padding: 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+  .summary dt { font-size: .8rem; font-weight: bold; color: var(--text-sub); }
+  .summary dd { margin: 0; }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: .8rem; font-weight: bold; background: var(--accent-soft); color: var(--accent); }
+  .unconfirmed { display: inline-block; padding: 0 6px; border: 1px dashed var(--bad); color: var(--bad); font-size: .75rem; font-weight: bold; border-radius: 4px; }
+
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; list-style: none; padding: 0; margin: 0; counter-reset: step; }
+  .flow li { flex: 1 1 160px; padding: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font-size: .9rem; position: relative; counter-increment: step; }
+  .flow li::before { content: counter(step); display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; border-radius: 50%; background: var(--accent); color: #fff; font-size: .75rem; font-weight: bold; margin-right: 6px; }
+  .flow .actor { display: block; font-size: .75rem; color: var(--text-sub); margin-top: 4px; }
+
+  .table-scroll { overflow-x: auto; }
+  table.doc-table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: .9rem; }
+  .doc-table th, .doc-table td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  .doc-table thead th { background: var(--surface-2); white-space: nowrap; }
+  .doc-table tbody th { background: var(--surface-2); font-weight: bold; white-space: nowrap; }
+  .doc-table .rec { background: var(--accent-soft); }
+  .src { color: var(--text-sub); font-size: .8rem; }
+
+  .option { margin-top: 32px; padding: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .option.is-recommended { border: 2px solid var(--accent); }
+  .option-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+  .option-head h2 { margin: 0; font-size: 1.25rem; }
+  .option .lead { font-size: 1.05rem; margin: 8px 0 16px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .two-col { grid-template-columns: 1fr; } }
+  .box { padding: 12px 16px; background: var(--surface-2); border-radius: 8px; font-size: .9rem; }
+  .box h4 { margin: 0 0 4px; font-size: .85rem; }
+  .box ul { margin: 0; padding-left: 1.2em; }
+  .good h4 { color: var(--good); } .bad h4 { color: var(--bad); }
+
+  .mock { margin: 16px 0; }
+  .mock-caption { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: .85rem; color: var(--text-sub); margin-bottom: 6px; }
+  .mock-label { display: inline-block; padding: 0 6px; margin-right: 6px; border-radius: 4px; background: var(--text-sub); color: var(--bg); font-size: .7rem; font-weight: bold; letter-spacing: .05em; }
+  .reset { font: inherit; font-size: .8rem; padding: 2px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+  .sui-frame { min-height: 320px; }
+</style>
+</head>
+<body>
+<main class="doc">
+
+  <!-- 1. ヘッダー -->
+  <header>
+    <p class="meta">仕様・デザイン検討 / 2026-11-14</p>
+    <h1>{{ 検討タイトル 例: 評価者向け 評価入力画面の検討 }}</h1>
+    <dl class="summary">
+      <div><dt>決めたいこと</dt><dd>{{ 例: 評価者が複数人の評価をまとめて入力するときの、入力画面の形 }}</dd></div>
+      <div><dt>推奨</dt><dd><span class="pill">案A</span> {{ 例: 一覧上でその場で入力する。大半の評価者が5〜10人をまとめて入力するため }}</dd></div>
+    </dl>
+  </header>
+
+  <!-- 2. 背景と業務フロー -->
+  <h2>背景と業務フロー</h2>
+  <p>{{ 背景を2〜3文で }}</p>
+  <ol class="flow">
+    <li>評価期間が始まる<span class="actor">人事担当者</span></li>
+    <li>被評価者が自己評価を入力<span class="actor">被評価者</span></li>
+    <li>評価者が評価を入力<span class="actor">評価者</span></li>
+    <li>人事が確認・確定<span class="actor">人事担当者</span></li>
+  </ol>
+
+  <!-- 3. ユースケース -->
+  <h2>ユースケース</h2>
+  <div class="table-scroll">
+    <table class="doc-table">
+      <thead><tr><th>アクター</th><th>したいこと</th><th>区分</th></tr></thead>
+      <tbody>
+        <tr><td>評価者</td><td>部下5〜10人の評価を、比べながら一度に入力したい</td><td>主要</td></tr>
+        <tr><td>評価者</td><td>1人の評価をじっくり、自己評価を見ながら書きたい</td><td>主要</td></tr>
+        <tr><td>評価者</td><td>50人以上の評価を短期間で入力したい <span class="unconfirmed">未確認</span></td><td>少数だが重い</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 4. 前提条件 -->
+  <h2>前提条件</h2>
+  <div class="table-scroll">
+    <table class="doc-table">
+      <thead><tr><th>種類</th><th>内容</th><th>出典</th></tr></thead>
+      <tbody>
+        <tr><th>仕様上の制約</th><td>{{ }}</td><td class="src">{{ 例: PRD / app/models/xxx.rb / ヒアリング }}</td></tr>
+        <tr><th>技術的制約</th><td>{{ }}</td><td class="src">{{ }}</td></tr>
+        <tr><th>スコープ外</th><td>{{ }}</td><td class="src">{{ }}</td></tr>
+        <tr><th>決定済みの方針</th><td>{{ }}</td><td class="src">{{ }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 5. 固定した判断 -->
+  <h2>固定した判断</h2>
+  <div class="table-scroll">
+    <table class="doc-table">
+      <thead><tr><th>判断</th><th>固定した内容</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr><td>保存方法</td><td>保存ボタンで確定 (自動保存しない)</td><td>既存の評価画面と揃える</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 6. 検討の主軸 -->
+  <h2>検討の主軸</h2>
+  <p><strong>{{ 主軸 例: 入力の単位 (複数人を一画面で / 1人ずつ) }}</strong></p>
+  <div class="table-scroll">
+    <table class="doc-table">
+      <thead><tr><th></th><th>複数人を一画面で</th><th>1人ずつ</th></tr></thead>
+      <tbody><tr><th>案</th><td>案A</td><td>案B</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- 7. 案A -->
+  <section class="option is-recommended" id="option-a">
+    <div class="option-head"><h2>案A: 一覧上でその場で入力する</h2><span class="pill">推奨</span></div>
+    <p class="lead">被評価者の一覧に評価欄を並べ、行ごとに入力して最後にまとめて保存する。</p>
+
+    <h3>業務フローの流れ</h3>
+    <p>評価一覧を開く → 各行の評価を選ぶ → コメントを入力 → まとめて保存</p>
+
+    <h3>モック</h3>
+    <div class="mock">
+      <div class="mock-caption"><span><span class="mock-label">モック</span>評価一覧 (入力途中)</span></div>
+      <div class="sui-frame">
+        <header class="sui-appheader"><span class="sui-appheader__name">人事評価</span><span class="sui-appheader__spacer"></span><span class="sui-text-grey">評価者</span></header>
+        <div class="sui-page sui-stack--l sui-stack">
+          <div class="sui-cluster sui-cluster--between">
+            <h1 class="sui-h-screen">2026年度 上期評価</h1>
+            <button class="sui-btn sui-btn--primary" type="button">保存</button>
+          </div>
+          <div class="sui-table-wrap">
+            <table class="sui-table">
+              <thead><tr><th>被評価者</th><th>自己評価</th><th>評価</th><th>コメント</th><th>状態</th></tr></thead>
+              <tbody>
+                <tr><td>佐藤 花子</td><td>A</td><td><select class="sui-select"><option>A</option></select></td><td><input class="sui-input" value="目標を上回る成果"></td><td><span class="sui-status sui-status--blue">入力済み</span></td></tr>
+                <tr><td>鈴木 一郎</td><td>B</td><td><select class="sui-select"><option>選択してください</option></select></td><td><input class="sui-input" placeholder="コメント"></td><td><span class="sui-status sui-status--grey">未入力</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <h3>プロトタイプ</h3>
+    <div class="mock">
+      <div class="mock-caption"><span><span class="mock-label">操作可</span>評価を選んで保存してみる</span><button class="reset" type="button" data-reset="proto-a">最初に戻す</button></div>
+      <div class="sui-frame" data-proto="proto-a" id="proto-a"></div>
+    </div>
+
+    <div class="two-col">
+      <div class="box good"><h4>強いユースケース</h4><ul><li>5〜10人を比べながら入力する</li></ul></div>
+      <div class="box bad"><h4>弱いユースケース</h4><ul><li>長文のコメントを書く</li></ul></div>
+    </div>
+    <h3>実装コストとリスク</h3>
+    <p>{{ }}</p>
+    <h3>未解決の論点</h3>
+    <ul><li>{{ }}</li></ul>
+  </section>
+
+  <!-- 7. 案B -->
+  <section class="option" id="option-b">
+    <div class="option-head"><h2>案B: 1人ずつ詳細画面で入力する</h2></div>
+    <p class="lead">一覧から1人を選んで詳細画面に移り、入力して「保存して次へ」で次の人に進む。</p>
+
+    <h3>モック</h3>
+    <div class="mock">
+      <div class="mock-caption"><span><span class="mock-label">モック</span>評価詳細</span></div>
+      <div class="sui-frame">
+        <header class="sui-appheader"><span class="sui-appheader__name">人事評価</span><span class="sui-appheader__spacer"></span><span class="sui-text-grey">評価者</span></header>
+        <div class="sui-page sui-stack sui-stack--l">
+          <div class="sui-cluster sui-cluster--between">
+            <h1 class="sui-h-screen">佐藤 花子 さんの評価</h1>
+            <span class="sui-text-grey sui-text-s">1 / 8 人目</span>
+          </div>
+          <section class="sui-base sui-base--pad sui-stack">
+            <h2 class="sui-h-block">自己評価</h2>
+            <dl class="sui-dl"><dt>評価</dt><dd>A</dd><dt>コメント</dt><dd>新規顧客の獲得目標を120%達成した。</dd></dl>
+          </section>
+          <section class="sui-base sui-base--pad sui-stack">
+            <h2 class="sui-h-block">評価者の評価</h2>
+            <div class="sui-field"><label class="sui-field__label">評価 <span class="sui-required">必須</span></label><select class="sui-select" style="width:200px"><option>A</option></select></div>
+            <div class="sui-field"><label class="sui-field__label">コメント</label><textarea class="sui-textarea"></textarea></div>
+          </section>
+          <div class="sui-cluster sui-cluster--end"><button class="sui-btn" type="button">保存</button><button class="sui-btn sui-btn--primary" type="button">保存して次へ</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="box good"><h4>強いユースケース</h4><ul><li>1人の評価をじっくり書く</li></ul></div>
+      <div class="box bad"><h4>弱いユースケース</h4><ul><li>複数人を比べながら入力する</li></ul></div>
+    </div>
+    <h3>実装コストとリスク</h3>
+    <p>{{ }}</p>
+    <h3>未解決の論点</h3>
+    <ul><li>{{ }}</li></ul>
+  </section>
+
+  <!-- 案C が必要なら同じ形で追加する。水増しのための案は作らない -->
+
+  <!-- 8. 比較表 -->
+  <h2>比較</h2>
+  <div class="table-scroll">
+    <table class="doc-table">
+      <thead><tr><th>観点</th><th class="rec">案A (推奨)</th><th>案B</th></tr></thead>
+      <tbody>
+        <tr><th>入力の単位</th><td class="rec">複数人を一画面で</td><td>1人ずつ</td></tr>
+        <tr><th>5〜10人の入力</th><td class="rec">画面遷移なしで完了</td><td>人数ぶん遷移が必要</td></tr>
+        <tr><th>長文コメント</th><td class="rec">入力欄が狭い</td><td>十分な広さ</td></tr>
+        <tr><th>実装コスト</th><td class="rec">{{ }}</td><td>{{ }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 9. 推奨と理由 -->
+  <h2>推奨と理由</h2>
+  <p>{{ 重視した前提とユースケース、他の案を選ぶべき状況 }}</p>
+
+  <!-- 10. 次に決めること -->
+  <h2>次に決めること</h2>
+  <ul><li>{{ 判断してほしい論点と、判断してほしい人 }}</li></ul>
+</main>
+
+<script>
+/*
+ * プロトタイプ: 1案につき1つの初期化関数を書き、PROTOS に登録する。
+ * 状態は関数内に閉じ込め、localStorage などには残さない。
+ */
+const PROTOS = {
+  'proto-a': (root) => {
+    const people = [
+      { name: '佐藤 花子', self: 'A', grade: '', comment: '' },
+      { name: '鈴木 一郎', self: 'B', grade: '', comment: '' },
+      { name: '高橋 美咲', self: 'B', grade: '', comment: '' },
+    ];
+    let notice = '';
+    const render = () => {
+      const done = people.filter(p => p.grade).length;
+      root.innerHTML = `
+        <header class="sui-appheader"><span class="sui-appheader__name">人事評価</span><span class="sui-appheader__spacer"></span><span class="sui-text-grey">評価者</span></header>
+        <div class="sui-page sui-stack sui-stack--l">
+          ${notice ? `<div class="sui-notice sui-notice--success" role="status">${notice}</div>` : ''}
+          <div class="sui-cluster sui-cluster--between">
+            <div class="sui-cluster sui-cluster--s"><h1 class="sui-h-screen">2026年度 上期評価</h1><span class="sui-badge">${done}/${people.length}</span></div>
+            <button class="sui-btn sui-btn--primary" type="button" data-act="save" ${done ? '' : 'aria-disabled="true"'}>保存</button>
+          </div>
+          <div class="sui-table-wrap"><table class="sui-table">
+            <thead><tr><th>被評価者</th><th>自己評価</th><th>評価</th><th>コメント</th><th>状態</th></tr></thead>
+            <tbody>${people.map((p, i) => `
+              <tr>
+                <td>${p.name}</td><td>${p.self}</td>
+                <td><select class="sui-select" data-i="${i}" data-k="grade">
+                  ${['', 'S', 'A', 'B', 'C'].map(g => `<option value="${g}" ${p.grade === g ? 'selected' : ''}>${g || '選択してください'}</option>`).join('')}
+                </select></td>
+                <td><input class="sui-input" data-i="${i}" data-k="comment" value="${p.comment}" placeholder="コメント"></td>
+                <td>${p.grade ? '<span class="sui-status sui-status--blue">入力済み</span>' : '<span class="sui-status sui-status--grey">未入力</span>'}</td>
+              </tr>`).join('')}
+            </tbody></table></div>
+        </div>`;
+    };
+    root.addEventListener('change', (e) => {
+      const { i, k } = e.target.dataset;
+      if (i === undefined) return;
+      people[i][k] = e.target.value; notice = ''; render();
+    });
+    root.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-act="save"]');
+      if (!btn || btn.getAttribute('aria-disabled') === 'true') return;
+      notice = `${people.filter(p => p.grade).length}人分の評価を保存しました (プロトタイプのため実際には保存されません)`;
+      render();
+    });
+    render();
+  },
+};
+
+const mount = (id) => {
+  const root = document.getElementById(id);
+  const fresh = root.cloneNode(false); // イベントリスナーを捨てて作り直す
+  root.replaceWith(fresh);
+  PROTOS[id](fresh);
+};
+Object.keys(PROTOS).forEach(mount);
+document.addEventListener('click', (e) => {
+  const id = e.target.closest('[data-reset]')?.dataset.reset;
+  if (id && PROTOS[id]) mount(id);
+});
+</script>
+</body>
+</html>
