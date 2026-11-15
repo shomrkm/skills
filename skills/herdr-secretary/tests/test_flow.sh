@@ -32,9 +32,9 @@ expect "キュー待ち" "$out"
 LOG="$FAKE_HERDR_STATE.log"
 grep -q "\"tab\", \"create\", \"--cwd\", \"$REPO\"" "$LOG" || fail "リポジトリでタブを作っていない"
 grep -q '"--env", "SECRETARY_TASK_ID=t001"' "$LOG" || fail "タスク ID を環境変数で渡していない"
-grep -q '"agent", "start", "t001", "--kind", "claude", "--pane", "w1:p1"' "$LOG" || fail "agent start が呼ばれていない"
+grep -qE '"agent", "start", "t001-[0-9a-f]{6}", "--kind", "claude", "--pane", "w1:p1"' "$LOG" || fail "agent start が呼ばれていない"
 grep -q '"--", "--settings", ".*worker-settings.json"' "$LOG" || fail "worker-settings を渡していない"
-grep -q '"agent", "prompt", "t001", "\[secretary\] .*prompt.md' "$LOG" || fail "最初の指示を送っていない"
+grep -qE '"agent", "prompt", "t001-[0-9a-f]{6}", "\[secretary\] .*prompt.md' "$LOG" || fail "最初の指示を送っていない"
 
 # 秘書からの最初のプロンプトは介入扱いにしない
 hook t001 UserPromptSubmit ',"prompt":"[secretary] read prompt.md"'
@@ -46,7 +46,7 @@ hook t001 PermissionRequest ',"tool_name":"Bash","tool_input":{"command":"bundle
 hook t001 Notification ',"message":"Claude needs your permission to use Bash"'
 out=$(watch); expect 't001 running→blocked 許可待ち: Bash `bundle exec rspec spec/requests`' "$out"
 [ "$(echo "$out" | wc -l)" -eq 1 ] || fail "許可待ちの通知が重複: $out"
-expect "1 タスク: Bash \`bundle exec rspec" "$($SEC permissions)"
+expect "Bash(bundle exec:\*)" "$($SEC permissions)"
 hook t001 PostToolUse ',"tool_name":"Bash"'
 out=$(watch); [ -z "$out" ] || fail "再開は通知しない: $out"
 expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t001/meta.json)"
@@ -59,7 +59,7 @@ out=$(watch); expect "running→blocked 入力待ち" "$out"
 
 # 秘書から返事を送ると running に戻り、介入扱いにならない
 out=$($SEC reply t001 "方針 A で進めて"); expect "送りました" "$out"
-grep -q '"agent", "prompt", "t001", "\[secretary\] 方針 A' "$LOG" || fail "送信されていない"
+grep -qE '"agent", "prompt", "t001-[0-9a-f]{6}", "\[secretary\] 方針 A' "$LOG" || fail "送信されていない"
 hook t001 UserPromptSubmit ',"prompt":"[secretary] 方針 A で進めて"'
 out=$(watch); [ -z "$out" ] || fail "秘書の返事で通知: $out"
 hook t001 Stop
@@ -133,16 +133,41 @@ echo t004 > "$FAKE_HERDR_STATE.not_ready"
 $SEC close t003 >/dev/null
 out=$($SEC new --repo myrepo --title four --done d --request r)
 expect "t004 queued→blocked 起動時の確認待ち" "$out"
-grep -q '"agent", "prompt", "t004"' "$LOG" && fail "確認待ちなのに指示を送った"
-python3 - <<PY
-import json; p="$SECRETARY_HOME/tasks/t004/meta.json"; m=json.load(open(p)); m["first_prompt_tried"]=0; json.dump(m,open(p,"w"))
-PY
-out=$(watch)
-grep -q '"agent", "prompt", "t004", "\[secretary\]' "$LOG" || fail "確認の後に最初の指示を送っていない"
+grep -q '"agent", "prompt", "t004' "$LOG" && fail "確認待ちなのに指示を送った"
+# 確認画面に Enter を送らないよう、自動では送り直さない
+out=$(watch); grep -q '"agent", "prompt", "t004' "$LOG" && fail "勝手に送り直した"
+rm "$FAKE_HERDR_STATE.not_ready"
+out=$($SEC retry t004); expect "送り直しました" "$out"
+grep -qE '"agent", "prompt", "t004-[0-9a-f]{6}", "\[secretary\]' "$LOG" || fail "retry で最初の指示を送っていない"
 expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t004/meta.json)"
 
+# 最初の指示が届かない（起動画面に吸い込まれた）と知らせる
+python3 - <<PY
+import json; p="$SECRETARY_HOME/config.json"; c=json.load(open(p)); c["first_prompt_ack_sec"]=0; json.dump(c,open(p,"w"))
+PY
+out=$(watch); expect "t004 running→blocked 起動画面で止まっている" "$out"
+out=$($SEC retry t004); hook t004 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
+out=$(watch); [ -z "$out" ] || fail "届いたのに通知: $out"
+
+# 作業エージェントが終了したら知らせ、retry で同じペインに起動し直す
+python3 - <<PY
+import json; p="$FAKE_HERDR_STATE"; d=json.load(open(p)); d["agents"]={k:v for k,v in d["agents"].items() if not k.startswith("t004")}; json.dump(d,open(p,"w"))
+PY
+out=$(watch); expect "t004 running→blocked 異常: 作業エージェントが終了した" "$out"
+$SEC retry t004 >/dev/null
+[ "$(grep -cE '"agent", "start", "t004-' "$LOG")" -ge 2 ] || fail "retry で起動し直していない"
+hook t004 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
+
+# 許可ルールの候補と sec allow
+hook t004 PermissionRequest ',"tool_name":"Bash","tool_input":{"command":"cd /x/y && git worktree add ../wt -b task/t004"}'
+out=$(watch); expect 't004 running→blocked 許可待ち: Bash `git worktree add ../wt -b task/t004`' "$out"
+expect "Bash(git worktree:\*)" "$($SEC permissions)"
+$SEC allow "Bash(git worktree:*)" >/dev/null
+grep -q 'Bash(git worktree:\*)' "$SECRETARY_HOME/worker-settings.json" || fail "allow が書かれていない"
+expect "Bash(git worktree:\*).*許可済みなのに止まった" "$($SEC permissions)"
+
 # peek は agent read で直近の画面を読む
-expect "(screen of t004)" "$($SEC peek t004)"
+expect "(screen of t004-" "$($SEC peek t004)"
 
 # SECRETARY_TASK_ID がなければ hook は何もしない
 before=$(wc -l < $SECRETARY_HOME/events.jsonl)

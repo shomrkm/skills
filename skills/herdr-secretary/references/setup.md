@@ -15,6 +15,7 @@ python3 <このリポジトリ>/skills/herdr-secretary/scripts/secretary.py init
 | `repos.md` | 作業対象のリポジトリ一覧。**自分で書く** |
 | `worker-settings.json` | 作業エージェント専用の設定。hook、タスクフォルダへの書き込み許可、ファイル編集の自動承認（`acceptEdits`）が入っている。Bash などの許可はここに足していく |
 | `tasks/` | タスクフォルダ |
+| `worktrees/` | リポジトリに作業場所のルールがないときの worktree 置き場。作業エージェントは確認なしで触れる |
 | `events.jsonl` | hook が書くイベントのログ |
 | `permissions.jsonl` | 許可待ちになったコマンドの記録（`sec permissions` で集計） |
 
@@ -34,16 +35,21 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 
 | やること | コマンド |
 |---|---|
-| タブを作る（フォーカスは移さない） | `herdr tab create --cwd <repo> --label <id> --no-focus --env SECRETARY_TASK_ID=<id> --env SECRETARY_HOME=<home>` → `.result.root_pane.pane_id` |
-| Claude Code を起動 | `herdr agent start <id> --kind claude --pane <pane> --timeout 60000 -- --settings <worker-settings.json>` |
-| 最初の指示・`sec reply` | `herdr agent prompt <id> "[secretary] ..."` |
-| ペインの生存確認 | `herdr pane list` → `.result.panes[].pane_id` |
-| 画面を読む（`sec peek`） | `herdr agent read <id> --source recent-unwrapped --lines N` |
+| タブを作る（秘書と同じワークスペース、フォーカスは移さない） | `herdr tab create --cwd <repo> --label <id> --no-focus --workspace $HERDR_WORKSPACE_ID --env SECRETARY_TASK_ID=<id> --env SECRETARY_HOME=<home>` → `.result.root_pane.pane_id` |
+| Claude Code を起動 | `herdr agent start <agent> --kind claude --pane <pane> --timeout 60000 -- --settings <worker-settings.json>` |
+| 最初の指示・`sec reply` | `herdr agent prompt <agent> "[secretary] ..."` |
+| ペインとエージェントの生存確認 | `herdr pane list` / `herdr agent list` |
+| 画面を読む（`sec peek`） | `herdr agent read <agent> --source recent-unwrapped --lines N`（JSON ではなく生のテキストが返る） |
+
+`<agent>` は `t001-1a2b3c` のように、タスク ID に秘書ディレクトリごとの識別子を付けた名前にしている。閉じたタスクのエージェントがまだ生きていても、名前がぶつからない。
 
 herdr のエラーは次のように扱う。
 
 - `agent_pane_busy`：作ったばかりのタブでシェルの準備がまだできていない。数秒だけ再試行する
-- `agent_not_ready`：起動時の確認（フォルダを信頼するか、など）で止まっている。blocked として知らせ、人間が答えたら最初の指示を送り直す
+- `agent_not_ready`：起動時の確認（フォルダを信頼するか、など）で止まっている。blocked として知らせる。人間がペインで答えたら `sec retry` で最初の指示を送り直す
+- `workspace_not_found`：アクティブなワークスペースがない（秘書が herdr の外にいる）。`secretary` ワークスペースを作ってそこにタブを置く
+
+herdr は Claude Code の起動直後の画面（初回の案内など）を「入力待ち」と判定することがある。その場合、最初の指示はその画面に吸い込まれる。そのため、最初の指示が hook（UserPromptSubmit）で届いたことを 30 秒以内に確認できなければ、blocked として知らせる。Enter を自動で送り直すことはしない（フォルダの信頼確認は、既定の選択肢が「No, exit」）。
 - `agent_blocked`：許可や選択肢のダイアログが出ている。`sec reply` は送らず、ペインで答えるよう案内する
 
 herdr のバージョンを上げて動かなくなったら、`herdr agent` と `herdr tab` のヘルプを見て `Herdr` クラスを直す。
@@ -62,7 +68,21 @@ sh skills/herdr-secretary/tests/test_flow.sh
 sh skills/herdr-secretary/tests/test_real_hooks.sh
 ```
 
-実機では、小さいタスク 1 つで「登録 → 起動 → 許可待ちの通知 → 直接介入 → result.md → review」まで通して試す。
+## 5. 実機での確認結果（herdr 0.9.5 + Claude Code 2.1.325）
+
+herdr をソースからビルドし、ヘッドレスのサーバーを立てて、本物の作業エージェントでタスクを流した。
+
+- 1 件：起動 → 起動画面での停止の検知 → retry → 許可待ちの通知（コマンド付き）→ ダイアログ中の `sec reply` はペインへ案内 → 許可 → worktree で作業 → result.md → review
+- 直接介入：review 後にペインで追加の指示 → manual → result.md が書き直されて review
+- 3 件の並列（各 1 ファイル作成）：
+
+| 条件 | 3 件すべて review まで | 人間の対応 |
+|---|---|---|
+| 最初の版 | 69 秒 | 許可 6 回 |
+| 既定の作業場所を許可（`worktrees/`） | 45 秒 | 許可 6 回 |
+| さらに「Bash は 1 コマンドずつ」を指示 | 39 秒 | 0 回 |
+
+許可で止まる原因の多くは、コマンドを `;` や `&&` でつなぐことと、作業ディレクトリの外を触ることだった。`sec permissions` は、許可済みのルールなのに止まったものも、その理由付きで出す。
 
 ## 設定（config.json）
 

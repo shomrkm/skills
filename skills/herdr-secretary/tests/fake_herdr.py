@@ -38,7 +38,7 @@ def flag(name, default=None):
 
 def listed(name):
     p = Path(f"{state_path}.{name}")
-    return p.exists() and args[2] in p.read_text().split()
+    return p.exists() and any(args[2].split("-")[0] == x for x in p.read_text().split())
 
 
 group, cmd = args[0], args[1] if len(args) > 1 else ""
@@ -47,6 +47,10 @@ if (group, cmd) == ("pane", "list"):
     ok("pane_list", panes=[{"pane_id": p, "terminal_id": "t", "workspace_id": "w1",
                             "tab_id": p.split(":")[0], "focused": False, "agent_status": "idle"}
                            for p in state["panes"]])
+
+if (group, cmd) == ("agent", "list"):
+    ok("agent_list", agents=[{"name": n, "pane_id": p, "agent": "claude", "agent_status": "idle"}
+                             for n, p in state["agents"].items()])
 
 if (group, cmd) == ("tab", "create"):
     assert "--no-focus" in args, "フォーカスを奪ってはいけない"
@@ -67,6 +71,8 @@ if (group, cmd) == ("agent", "start"):
         err("invalid_params", "unknown kind")
     if pane not in state["panes"]:
         err("pane_not_found", pane)
+    if name in state["agents"] and state["agents"][name] != pane:
+        err("agent_name_taken", f"agent name {name} is already used")
     if pane not in state.setdefault("warmed", []):
         state["warmed"].append(pane)
         save()
