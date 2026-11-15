@@ -74,7 +74,7 @@ herdr をソースからビルドし、ヘッドレスのサーバーを立て�
 
 - 1 件：起動 → 起動画面での停止の検知 → retry → 許可待ちの通知（コマンド付き）→ ダイアログ中の `sec reply` はペインへ案内 → 許可 → worktree で作業 → result.md → review
 - 直接介入：review 後にペインで追加の指示 → manual → result.md が書き直されて review
-- 3 件の並列（各 1 ファイル作成）：
+- 3 件の並列（各 1 ファイル作成、ルールのない小さなリポジトリ）：
 
 | 条件 | 3 件すべて review まで | 人間の対応 |
 |---|---|---|
@@ -82,7 +82,14 @@ herdr をソースからビルドし、ヘッドレスのサーバーを立て�
 | 既定の作業場所を許可（`worktrees/`） | 45 秒 | 許可 6 回 |
 | さらに「Bash は 1 コマンドずつ」を指示 | 39 秒 | 0 回 |
 
-許可で止まる原因の多くは、コマンドを `;` や `&&` でつなぐことと、作業ディレクトリの外を触ることだった。`sec permissions` は、許可済みのルールなのに止まったものも、その理由付きで出す。
+- 3 件の並列（実務に近い TypeScript リポジトリ。CLAUDE.md に「`../<repo>-worktrees/<branch>` に worktree、`npm ci`、テストを書く、`npm test` と `typecheck` を通す、Conventional Commits」のルールあり。機能追加 2 件とバグ修正 1 件）：
+
+| 条件 | 結果 | 人間の対応 |
+|---|---|---|
+| repos.md に worktree の場所を書かず、許可リストは読み取り系だけ | 47 秒で許可 13 回。その後、全件がリポジトリ外の worktree での Edit 確認で止まった（秘書は「3 件 blocked、19 分待ち」と出し続けた） | 許可 13 回以上 |
+| repos.md に `（worktrees: ../eval-app-worktrees）`、`sec permissions` の候補から `git add` / `git commit` / `npm ci` / `npm test` / `npm run` などを `sec allow` | 125 秒で 3 件とも review。全件ルールどおりのブランチにコミットされ、`npm test` と `typecheck` が通ることを別途確認 | **許可 0 回**。判断 3 回（既存の typecheck の不具合をどう直すか。3 件とも同じ質問）を `sec reply` で回答 |
+
+許可で止まる原因の多くは、コマンドを `;` や `&&` でつなぐこと、`git -C` や `npm --prefix` で場所を指定すること、作業ディレクトリの外（リポジトリの外の worktree）を触ることだった。許可ルールは先頭一致なので、`git status` を許可しても `git -C <dir> status` は止まる。そこで作業エージェントには、作業場所に一度だけ `cd` してから 1 コマンドずつ実行するよう指示している。`sec permissions` は、許可済みのルールなのに止まったものも、その理由付きで出す。
 
 ## 設定（config.json）
 
