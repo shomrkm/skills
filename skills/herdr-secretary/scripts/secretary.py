@@ -59,7 +59,6 @@ DEFAULT_CONFIG = {
     "notify": "auto",
     "poll_interval_sec": 1.0,
     "herdr_bin": "herdr",
-    "herdr_send_args": ["agent", "prompt", "{pane}", "{text}"],
 }
 
 
@@ -208,6 +207,8 @@ def apply_event(meta: dict, ev: dict) -> str | None:
         if status == BLOCKED and meta.get("reason", "").startswith("入力待ち") and not is_permission:
             # Stop の後の「入力待ちです」通知は同じ意味なので重ねない
             return None
+        if is_permission and status == BLOCKED and meta.get("reason", "").startswith("許可待ち"):
+            return None  # PermissionRequest で通知済み
         if is_permission and meta.get("pending_tool"):
             # 直前に始めようとしたツールが許可待ちの対象。何を許可すればいいかが一目で分かるようにする
             tool = meta["pending_tool"]
@@ -215,11 +216,20 @@ def apply_event(meta: dict, ev: dict) -> str | None:
             return transition(meta, BLOCKED, f"許可待ち: {tool['label']}")
         return transition(meta, BLOCKED, f"許可待ち: {msg[:80]}" if msg else "許可待ち")
 
+    if name == "PermissionRequest":
+        # Claude Code が許可ダイアログを出した（herdr 自身もこの hook で blocked を判定している）
+        if status in (MANUAL, REVIEW):
+            return None
+        tool = {"name": ev.get("tool", ""), "label": tool_label(ev), "started_at": meta["last_event_at"]}
+        meta["pending_tool"] = tool
+        record_permission(meta["id"], tool)
+        return transition(meta, BLOCKED, f"許可待ち: {tool['label']}")
+
     if name == "PreToolUse":
         meta["pending_tool"] = {"name": ev.get("tool", ""), "label": tool_label(ev), "started_at": meta["last_event_at"]}
         return None
 
-    if name == "PostToolUse":
+    if name in ("PostToolUse", "PostToolUseFailure"):
         meta.pop("pending_tool", None)
         # 許可されて作業が再開した
         if status == BLOCKED:
@@ -284,9 +294,18 @@ def periodic_checks(meta: dict, cfg: dict, live_panes: set[str] | None) -> str |
 # ---------------------------------------------------------------------------
 # herdr アダプタ
 #
-# herdr の CLI を呼ぶのはここだけ。書き方は herdr の公式ドキュメントで未確認の
-# 部分があるので、実機で `herdr --help` を見て合わせること（README 参照）。
+# herdr を呼ぶのはここだけ。herdr 0.9.5 のソース（src/cli, src/api/schema）と
+# 公式 agent skill（skills/herdr/SKILL.md）に合わせてある。
+# - 制御コマンドは JSON（{"id", "result": {...}}）を返す
+# - サーバーのエラーは stderr に JSON（{"error": {"code", "message"}}）、終了コード 1
+# - herdr のペインの中（HERDR_ENV=1）から呼ぶと、そのセッションを操作する
 # ---------------------------------------------------------------------------
+
+class HerdrError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}" if code else message)
+        self.code = code
+
 
 class Herdr:
     def __init__(self, cfg: dict):
@@ -295,87 +314,73 @@ class Herdr:
     def available(self) -> bool:
         return shutil.which(self.bin) is not None
 
-    def _run(self, *args: str) -> str:
-        r = subprocess.run([self.bin, *args], capture_output=True, text=True, timeout=30)
+    def _run(self, *args: str, timeout: int = 30) -> dict:
+        r = subprocess.run([self.bin, *args], capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
-            raise RuntimeError(f"herdr {' '.join(args)} failed: {r.stderr.strip()}")
-        return r.stdout
-
-    def snapshot(self) -> dict:
-        return json.loads(self._run("api", "snapshot"))
+            code, message = "", r.stderr.strip()
+            with contextlib.suppress(Exception):
+                body = json.loads(r.stderr).get("error", {})
+                code, message = body.get("code", ""), body.get("message", message)
+            raise HerdrError(code, message or f"herdr {' '.join(args)} が終了コード {r.returncode}")
+        out = r.stdout.strip()
+        try:
+            return json.loads(out).get("result", {}) if out else {}
+        except json.JSONDecodeError:
+            return {"text": r.stdout}
 
     def pane_ids(self) -> set[str]:
-        return set(_collect_pane_ids(self.snapshot()))
+        return {p["pane_id"] for p in self._run("pane", "list").get("panes", [])}
 
-    def create_tab(self, label: str) -> str:
-        """タブを作り、新しくできたペインの ID を返す。"""
-        before = self.pane_ids()
-        out = self._run("tab", "create", "--label", label)
-        after = self.pane_ids()
-        new = sorted(after - before)
-        if len(new) == 1:
-            return new[0]
-        # 出力にペイン ID が出る実装ならそれを使う
-        m = re.search(r"\b(w\d+:p\d+|\S+:p\d+)\b", out)
-        if m:
-            return m.group(1)
-        raise RuntimeError(f"新しいペインを特定できなかった（候補: {new}）")
+    def start_worker(self, meta: dict, settings: Path) -> str:
+        """タブを作り（フォーカスは移さない）、そのペインで Claude Code を起動する。ペイン ID を返す。"""
+        tab = self._run(
+            "tab", "create", "--cwd", meta["repo"], "--label", meta["id"], "--no-focus",
+            "--env", f"SECRETARY_TASK_ID={meta['id']}", "--env", f"SECRETARY_HOME={home()}",
+        )
+        pane = tab["root_pane"]["pane_id"]
+        meta["pane"] = pane
+        meta["tab"] = tab.get("tab", {}).get("tab_id")
+        # agent start は Claude Code が入力を受け付けられる状態になってから返る。
+        # 作ったばかりのタブはシェルのプロンプトが出る前だと agent_pane_busy になるので少し待つ
+        for attempt in range(20):
+            try:
+                self._run("agent", "start", meta["id"], "--kind", "claude", "--pane", pane,
+                          "--timeout", "60000", "--", "--settings", str(settings), timeout=90)
+                return pane
+            except HerdrError as e:
+                if e.code != "agent_pane_busy" or attempt == 19:
+                    raise
+                time.sleep(0.5)
+        return pane
 
-    def pane_run(self, pane: str, command: str) -> None:
-        self._run("pane", "run", pane, command)
+    def prompt(self, agent: str, text: str) -> None:
+        self._run("agent", "prompt", agent, text)
 
-    def pane_read(self, pane: str, lines: int) -> str:
-        return self._run("pane", "read", pane, "--source", "recent", "--lines", str(lines))
-
-    def send(self, pane: str, text: str, cfg: dict) -> None:
-        """作業エージェントに入力を送る。書き方は config の herdr_send_args で変えられる。"""
-        args = [a.replace("{pane}", pane).replace("{text}", text) for a in cfg["herdr_send_args"]]
-        self._run(*args)
-
-
-def _collect_pane_ids(node) -> list[str]:
-    """snapshot の JSON からペイン ID を集める。スキーマが未確認なので、
-    "panes" 配下の要素の id / pane_id / pane を拾う緩い実装にしている。"""
-    found: list[str] = []
-    if isinstance(node, dict):
-        for k, v in node.items():
-            if k == "panes" and isinstance(v, list):
-                for p in v:
-                    if isinstance(p, dict):
-                        for key in ("pane_id", "id", "pane"):
-                            if isinstance(p.get(key), str):
-                                found.append(p[key])
-                                break
-                    elif isinstance(p, str):
-                        found.append(p)
-            found.extend(_collect_pane_ids(v))
-    elif isinstance(node, list):
-        for v in node:
-            found.extend(_collect_pane_ids(v))
-    return found
+    def read(self, agent: str, lines: int) -> str:
+        r = self._run("agent", "read", agent, "--source", "recent-unwrapped", "--lines", str(lines))
+        return r.get("read", {}).get("text") or r.get("text") or json.dumps(r, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
 # 起動
 # ---------------------------------------------------------------------------
 
-def worker_command(meta: dict) -> str:
-    settings = home() / "worker-settings.json"
-    prompt = f"{SECRETARY_MARK} {task_dir(meta['id']) / 'prompt.md'} を読んで、その指示に従って作業してください。"
-    return " ".join([
-        "cd", shlex.quote(meta["repo"]), "&&",
-        f"SECRETARY_TASK_ID={shlex.quote(meta['id'])}",
-        f"SECRETARY_HOME={shlex.quote(str(home()))}",
-        "claude", "--settings", shlex.quote(str(settings)), shlex.quote(prompt),
-    ])
+def first_prompt(meta: dict) -> str:
+    return f"{SECRETARY_MARK} {task_dir(meta['id']) / 'prompt.md'} を読んで、その指示に従って作業してください。"
 
 
 def launch(meta: dict, herdr: Herdr) -> str | None:
-    pane = herdr.create_tab(meta["id"])
-    herdr.pane_run(pane, worker_command(meta))
-    meta["pane"] = pane
     meta["started_at"] = now_iso()
     meta["last_event_at"] = meta["started_at"]
+    try:
+        herdr.start_worker(meta, home() / "worker-settings.json")
+    except HerdrError as e:
+        if e.code == "agent_not_ready":
+            # 起動時の確認（フォルダの信頼など）で止まっている。人間がペインで答えれば進む
+            meta["pending_first_prompt"] = True
+            return transition(meta, BLOCKED, "起動時の確認待ち（ペインで答えてください）")
+        raise
+    herdr.prompt(meta["id"], first_prompt(meta))
     return transition(meta, RUNNING, "起動")
 
 
@@ -448,8 +453,10 @@ def cmd_init(args) -> int:
             "UserPromptSubmit": hook,
             "Stop": hook,
             "Notification": hook,
+            "PermissionRequest": [{"matcher": "*", "hooks": hook[0]["hooks"]}],
             "PreToolUse": [{"matcher": "*", "hooks": hook[0]["hooks"]}],
             "PostToolUse": [{"matcher": "*", "hooks": hook[0]["hooks"]}],
+            "PostToolUseFailure": [{"matcher": "*", "hooks": hook[0]["hooks"]}],
         },
     }
     (h / "worker-settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
@@ -620,7 +627,7 @@ def cmd_peek(args) -> int:
     if not meta.get("pane"):
         print("まだ起動していません。", file=sys.stderr)
         return 1
-    print(Herdr(load_config()).pane_read(meta["pane"], args.lines))
+    print(Herdr(load_config()).read(meta["id"], args.lines))
     return 0
 
 
@@ -629,12 +636,14 @@ def cmd_reply(args) -> int:
     if not meta.get("pane"):
         print("まだ起動していません。", file=sys.stderr)
         return 1
-    cfg = load_config()
     try:
-        Herdr(cfg).send(meta["pane"], f"{SECRETARY_MARK} {args.text}", cfg)
-    except Exception as e:
-        print(f"送れませんでした（{e}）。ペイン {meta['pane']} で直接入力してください。"
-              "herdr の送信コマンドが違う場合は config.json の herdr_send_args を直してください。", file=sys.stderr)
+        Herdr(load_config()).prompt(meta["id"], f"{SECRETARY_MARK} {args.text}")
+    except HerdrError as e:
+        if e.code == "agent_blocked":
+            print(f"{args.id} は許可や選択肢のダイアログを出しているので、文字では答えられません。"
+                  f"ペイン {meta['pane']} で直接答えてください。", file=sys.stderr)
+        else:
+            print(f"送れませんでした（{e}）。ペイン {meta['pane']} で直接入力してください。", file=sys.stderr)
         return 1
     with locked():
         meta = read_meta(args.id)
@@ -704,11 +713,11 @@ def cmd_hook(args) -> int:
         ev["from_secretary"] = (data.get("prompt") or "").lstrip().startswith(SECRETARY_MARK)
     elif ev["event"] == "Notification":
         ev["message"] = data.get("message", "")
-    elif ev["event"] == "PreToolUse":
+    elif ev["event"] in ("PreToolUse", "PermissionRequest"):
         ev["tool"] = data.get("tool_name", "")
         inp = data.get("tool_input") or {}
         ev["input"] = {k: inp[k] for k in ("command", "file_path", "url", "pattern") if k in inp}
-    elif ev["event"] == "PostToolUse":
+    elif ev["event"] in ("PostToolUse", "PostToolUseFailure"):
         ev["tool"] = data.get("tool_name", "")
     line = json.dumps(ev, ensure_ascii=False) + "\n"
     fd = os.open(events_path(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
@@ -809,7 +818,20 @@ def cmd_watch(args) -> int:
                     write_meta(meta)
                     lines.append(line)
 
-            # 3. 空きがあればキューから起動
+            # 3. 起動時の確認で止まっていたタスクに、最初の指示を送り直す
+            for meta in all_metas():
+                if meta.get("pending_first_prompt") and meta["status"] == BLOCKED \
+                        and time.time() - meta.get("first_prompt_tried", 0) > 10:
+                    meta["first_prompt_tried"] = time.time()
+                    try:
+                        herdr.prompt(meta["id"], first_prompt(meta))
+                        meta.pop("pending_first_prompt", None)
+                        transition(meta, RUNNING, "起動")
+                    except HerdrError:
+                        pass
+                    write_meta(meta)
+
+            # 4. 空きがあればキューから起動
             lines.extend(fill_slots(cfg, herdr))
 
         backlog = sum(1 for m in all_metas() if m["status"] == REVIEW)

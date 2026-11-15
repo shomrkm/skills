@@ -4,7 +4,7 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 SEC="python3 $HERE/../scripts/secretary.py"
 TMP=$(mktemp -d)
-export SECRETARY_HOME="$TMP/home" HERDR_BIN="$HERE/fake_herdr.sh" FAKE_HERDR_STATE="$TMP/herdr.json"
+export SECRETARY_HOME="$TMP/home" HERDR_BIN="$HERE/fake_herdr.py" FAKE_HERDR_STATE="$TMP/herdr.json"
 REPO="$TMP/repo"; mkdir -p "$REPO"
 fail() { echo "FAIL: $*"; $SEC list --all; cat "$FAKE_HERDR_STATE.log"; exit 1; }
 expect() { echo "$2" | grep -q -- "$1" || fail "expected '$1' in: $2"; }
@@ -29,17 +29,23 @@ expect "t001 queued→running" "$out"
 $SEC new --repo "$REPO" --title "two" --done d --request r >/dev/null
 out=$($SEC new --repo "$REPO" --title "three" --done d --request r)
 expect "キュー待ち" "$out"
-grep -q "pane run w1:p1 cd" "$FAKE_HERDR_STATE.log" || fail "pane run が呼ばれていない"
-grep -q "claude --settings" "$FAKE_HERDR_STATE.log" || fail "claude 起動コマンドがない"
+LOG="$FAKE_HERDR_STATE.log"
+grep -q "\"tab\", \"create\", \"--cwd\", \"$REPO\"" "$LOG" || fail "リポジトリでタブを作っていない"
+grep -q '"--env", "SECRETARY_TASK_ID=t001"' "$LOG" || fail "タスク ID を環境変数で渡していない"
+grep -q '"agent", "start", "t001", "--kind", "claude", "--pane", "w1:p1"' "$LOG" || fail "agent start が呼ばれていない"
+grep -q '"--", "--settings", ".*worker-settings.json"' "$LOG" || fail "worker-settings を渡していない"
+grep -q '"agent", "prompt", "t001", "\[secretary\] .*prompt.md' "$LOG" || fail "最初の指示を送っていない"
 
 # 秘書からの最初のプロンプトは介入扱いにしない
 hook t001 UserPromptSubmit ',"prompt":"[secretary] read prompt.md"'
 out=$(watch); [ -z "$out" ] || fail "secretary prompt で通知が出た: $out"
 
-# 許可待ち → どのコマンドかが通知に出る → 再開
+# 許可待ち（PermissionRequest）→ どのコマンドかが通知に出る。後から来る Notification は重ねない → 再開
 hook t001 PreToolUse ',"tool_name":"Bash","tool_input":{"command":"bundle exec rspec spec/requests"}'
+hook t001 PermissionRequest ',"tool_name":"Bash","tool_input":{"command":"bundle exec rspec spec/requests"}'
 hook t001 Notification ',"message":"Claude needs your permission to use Bash"'
 out=$(watch); expect 't001 running→blocked 許可待ち: Bash `bundle exec rspec spec/requests`' "$out"
+[ "$(echo "$out" | wc -l)" -eq 1 ] || fail "許可待ちの通知が重複: $out"
 expect "1 タスク: Bash \`bundle exec rspec" "$($SEC permissions)"
 hook t001 PostToolUse ',"tool_name":"Bash"'
 out=$(watch); [ -z "$out" ] || fail "再開は通知しない: $out"
@@ -53,11 +59,17 @@ out=$(watch); expect "running→blocked 入力待ち" "$out"
 
 # 秘書から返事を送ると running に戻り、介入扱いにならない
 out=$($SEC reply t001 "方針 A で進めて"); expect "送りました" "$out"
-grep -q "agent prompt w1:p1 \[secretary\] 方針 A" "$FAKE_HERDR_STATE.log" || fail "送信されていない"
+grep -q '"agent", "prompt", "t001", "\[secretary\] 方針 A' "$LOG" || fail "送信されていない"
 hook t001 UserPromptSubmit ',"prompt":"[secretary] 方針 A で進めて"'
 out=$(watch); [ -z "$out" ] || fail "秘書の返事で通知: $out"
 hook t001 Stop
 out=$(watch); expect "running→blocked 入力待ち" "$out"
+
+# ダイアログ中は文字で答えられないので、ペインに誘導する
+echo t001 > "$FAKE_HERDR_STATE.blocked"
+if out=$($SEC reply t001 "yes" 2>&1); then fail "ダイアログ中に送れてしまった"; fi
+expect "ペイン w1:p1 で直接答えてください" "$out"
+rm "$FAKE_HERDR_STATE.blocked"
 
 # 人間が直接指示 → manual。manual 中の Stop / Notification は黙る
 hook t001 UserPromptSubmit ',"prompt":"いや、別の方法で"'
@@ -112,9 +124,25 @@ expect "t003 manual→running 15 分介入がないので秘書に戻した" "$o
 
 # ペインが消えたら異常
 python3 - <<PY
-import json; p="$FAKE_HERDR_STATE"; d=json.load(open(p)); d["panes"]=[x for x in d["panes"] if x["id"]!="w2:p1"]; json.dump(d,open(p,"w"))
+import json; p="$FAKE_HERDR_STATE"; d=json.load(open(p)); d["panes"]=[x for x in d["panes"] if x!="w1:p2"]; json.dump(d,open(p,"w"))
 PY
 out=$(watch); expect "t002 running→blocked 異常: ペインが見つからない" "$out"
+
+# 起動時の確認（フォルダの信頼など）で止まったら知らせ、答えた後に最初の指示を送り直す
+echo t004 > "$FAKE_HERDR_STATE.not_ready"
+$SEC close t003 >/dev/null
+out=$($SEC new --repo myrepo --title four --done d --request r)
+expect "t004 queued→blocked 起動時の確認待ち" "$out"
+grep -q '"agent", "prompt", "t004"' "$LOG" && fail "確認待ちなのに指示を送った"
+python3 - <<PY
+import json; p="$SECRETARY_HOME/tasks/t004/meta.json"; m=json.load(open(p)); m["first_prompt_tried"]=0; json.dump(m,open(p,"w"))
+PY
+out=$(watch)
+grep -q '"agent", "prompt", "t004", "\[secretary\]' "$LOG" || fail "確認の後に最初の指示を送っていない"
+expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t004/meta.json)"
+
+# peek は agent read で直近の画面を読む
+expect "(screen of t004)" "$($SEC peek t004)"
 
 # SECRETARY_TASK_ID がなければ hook は何もしない
 before=$(wc -l < $SECRETARY_HOME/events.jsonl)

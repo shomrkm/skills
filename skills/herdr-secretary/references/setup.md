@@ -28,24 +28,38 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 
 秘書には `~/secretary/bin/sec` の実行を許可しておく（`.claude/settings.json` の `permissions.allow` に `Bash(~/secretary/bin/sec:*)` を入れる）。
 
-## 3. herdr の CLI を実機で確認する（要対応）
+## 3. herdr との連携
 
-herdr の公式ドキュメントで確認しきれていない部分がある。herdr を呼ぶのは `scripts/secretary.py` の `Herdr` クラスだけなので、`herdr --help` を見て合わなければそこを直す。
+秘書は herdr のペインの中（`HERDR_ENV=1`）で動かす。そうすると、`herdr` コマンドがそのセッションを操作する。herdr を呼ぶ処理は `scripts/secretary.py` の `Herdr` クラスにまとめてあり、herdr 0.9.5 のソースと公式 agent skill に合わせてある。
 
-| 使っているコマンド | 前提にしていること |
+| やること | コマンド |
 |---|---|
-| `herdr api snapshot` | JSON を返す。`panes` という配列の要素に `id`（または `pane_id`）がある |
-| `herdr tab create --label <id>` | 新しいタブとペインができる。snapshot を作成前後で比べて、新しいペインを特定する |
-| `herdr pane run <pane> "<command>"` | そのペインのシェルでコマンドを実行する |
-| `herdr pane read <pane> --source recent --lines N` | 画面の直近 N 行を返す |
-| `herdr agent prompt <pane> <text>` | 作業エージェントに入力を送る（`sec reply`）。違えば config.json の `herdr_send_args` を直す |
+| タブを作る（フォーカスは移さない） | `herdr tab create --cwd <repo> --label <id> --no-focus --env SECRETARY_TASK_ID=<id> --env SECRETARY_HOME=<home>` → `.result.root_pane.pane_id` |
+| Claude Code を起動 | `herdr agent start <id> --kind claude --pane <pane> --timeout 60000 -- --settings <worker-settings.json>` |
+| 最初の指示・`sec reply` | `herdr agent prompt <id> "[secretary] ..."` |
+| ペインの生存確認 | `herdr pane list` → `.result.panes[].pane_id` |
+| 画面を読む（`sec peek`） | `herdr agent read <id> --source recent-unwrapped --lines N` |
+
+herdr のエラーは次のように扱う。
+
+- `agent_pane_busy`：作ったばかりのタブでシェルの準備がまだできていない。数秒だけ再試行する
+- `agent_not_ready`：起動時の確認（フォルダを信頼するか、など）で止まっている。blocked として知らせ、人間が答えたら最初の指示を送り直す
+- `agent_blocked`：許可や選択肢のダイアログが出ている。`sec reply` は送らず、ペインで答えるよう案内する
+
+herdr のバージョンを上げて動かなくなったら、`herdr agent` と `herdr tab` のヘルプを見て `Herdr` クラスを直す。
 
 ## 4. 動作確認
 
-偽の herdr を使ったテストがある。
+偽の herdr（herdr 0.9.5 と同じ引数・同じ JSON を返す）を使ったテストがある。
 
 ```bash
 sh skills/herdr-secretary/tests/test_flow.sh
+```
+
+本物の Claude Code で、hook から review までの流れを確かめるテストもある（`claude -p` を 1 回呼ぶ）。
+
+```bash
+sh skills/herdr-secretary/tests/test_real_hooks.sh
 ```
 
 実機では、小さいタスク 1 つで「登録 → 起動 → 許可待ちの通知 → 直接介入 → result.md → review」まで通して試す。
@@ -61,5 +75,4 @@ sh skills/herdr-secretary/tests/test_flow.sh
 | `manual_timeout_min` | 15 | 人間の入力がこの分数途切れたら自動で秘書に戻す。0 で無効 |
 | `review_backlog_alert` | 5 | レビュー待ちがこの件数に達したら知らせる。0 で無効 |
 | `notify` | `auto` | デスクトップ通知。`auto` は macOS なら osascript。`off` で無効。`{text}` を含むコマンドも書ける |
-| `herdr_send_args` | `["agent","prompt","{pane}","{text}"]` | `sec reply` で使う herdr の引数 |
 | `herdr_bin` | `herdr` | herdr のコマンド名 |
