@@ -89,6 +89,16 @@ herdr をソースからビルドし、ヘッドレスのサーバーを立て�
 | repos.md に worktree の場所を書かず、許可リストは読み取り系だけ | 47 秒で許可 13 回。その後、全件がリポジトリ外の worktree での Edit 確認で止まった（秘書は「3 件 blocked、19 分待ち」と出し続けた） | 許可 13 回以上 |
 | repos.md に `（worktrees: ../eval-app-worktrees）`、`sec permissions` の候補から `git add` / `git commit` / `npm ci` / `npm test` / `npm run` などを `sec allow` | 125 秒で 3 件とも review。全件ルールどおりのブランチにコミットされ、`npm test` と `typecheck` が通ることを別途確認 | **許可 0 回**。判断 3 回（既存の typecheck の不具合をどう直すか。3 件とも同じ質問）を `sec reply` で回答 |
 
+- 2 件の並列 × 3 回（Rails 7.2 API + RSpec + SQLite。CLAUDE.md に worktree の場所、`bundle install`、`bin/rails db:prepare`、`bundle exec rspec`、Conventional Commits のルールあり。バリデーション・API 追加など）：
+
+| 回 | 許可リスト | 2 件すべて review まで | 人間の許可 |
+|---|---|---|---|
+| 1 回目 | Rails 用は何もない | 166 秒 | 23 回 |
+| 2 回目 | `sec permissions` の候補から `bundle install` / `bundle exec rspec` / `bin/rails db:prepare` / `env RAILS_ENV=test bin/rails db:prepare` などを `sec allow` | 111 秒 | 9 回（うち 8 回は、この検証環境で rspec にパスが通っていない問題を作業エージェントが回避しようとしたもの） |
+| 3 回目 | 環境の問題を直した（作業エージェントが残課題に書いた方法） | 64 秒 | 2 回（`bin/rails generate migration` と `bin/rails db:migrate`。初めて出てきた DB を変える操作で、確認するのが妥当） |
+
+どの回も全件ルールどおりのブランチにコミットされ、`bundle exec rspec` が通ることを別途確認した。
+
 許可で止まる原因の多くは、コマンドを `;` や `&&` でつなぐこと、`git -C` や `npm --prefix` で場所を指定すること、作業ディレクトリの外（リポジトリの外の worktree）を触ることだった。許可ルールは先頭一致なので、`git status` を許可しても `git -C <dir> status` は止まる。そこで作業エージェントには、作業場所に一度だけ `cd` してから 1 コマンドずつ実行するよう指示している。`sec permissions` は、許可済みのルールなのに止まったものも、その理由付きで出す。
 
 ## 設定（config.json）
