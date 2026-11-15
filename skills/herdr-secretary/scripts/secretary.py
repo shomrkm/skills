@@ -270,24 +270,35 @@ def suggest_rule(tool: dict) -> str | None:
     label = tool.get("label", "")
     m = re.search(r"`(.*)`", label)
     cmd = (m.group(1) if m else "").strip()
-    # つながったコマンドから、cd と変数代入を飛ばした最初の本体を拾う
+    # つながったコマンドから cd 以外の最初の本体を拾う。許可ルールは先頭一致なので、
+    # 先頭の `env` や `RAILS_ENV=test` のような変数指定はルールにそのまま残す
     words: list[str] = []
     for seg in re.split(r"\s*(?:&&|\|\||;|\|)\s*", cmd.removesuffix("...")):
-        ws = [w for w in seg.split() if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", w)]
+        ws = seg.split()
         if ws and ws[0] != "cd":
             words = ws
             break
+    lead: list[str] = []
+    while words and (words[0] == "env" or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0])):
+        lead.append(words.pop(0))
     if not words:
-        return None
+        return None  # `env` だけ、変数だけのルールは何でも通してしまうので出さない
     # `git -C <dir> add` や `npm --prefix <dir> ci` の場所指定は飛ばし、サブコマンドで候補を作る
     # （`Bash(git -C:*)` を許可すると push まで通ってしまう）
     rest = words[1:]
     while len(rest) >= 2 and rest[0] in ("-C", "--prefix", "--cwd", "--git-dir", "--work-tree", "--dir"):
         rest = rest[2:]
     if words[0] in TWO_WORD_COMMANDS and rest:
-        return f"Bash({words[0]} {rest[0]}:*)"
-    prefix = words[:1]
-    return f"Bash({' '.join(prefix)}:*)"
+        body = [words[0], rest[0]]
+        # `bundle exec` / `npm run` は何でも実行できるので、実行するものまで含める
+        if tuple(body) in THREE_WORD_PREFIXES and len(rest) > 1:
+            body.append(rest[1])
+    else:
+        body = words[:1]
+    return f"Bash({' '.join(lead + body)}:*)"
+
+
+THREE_WORD_PREFIXES = {("bundle", "exec"), ("npm", "run"), ("pnpm", "run"), ("yarn", "run"), ("npx", "--yes")}
 
 
 def record_permission(task_id: str, tool: dict) -> None:

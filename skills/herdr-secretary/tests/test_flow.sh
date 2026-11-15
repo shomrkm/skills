@@ -47,7 +47,7 @@ hook t001 PermissionRequest ',"tool_name":"Bash","tool_input":{"command":"bundle
 hook t001 Notification ',"message":"Claude needs your permission to use Bash"'
 out=$(watch); expect 't001 running→blocked 許可待ち: Bash `bundle exec rspec spec/requests`' "$out"
 [ "$(echo "$out" | wc -l)" -eq 1 ] || fail "許可待ちの通知が重複: $out"
-expect "Bash(bundle exec:\*)" "$($SEC permissions)"
+expect "Bash(bundle exec rspec:\*)" "$($SEC permissions)"
 hook t001 PostToolUse ',"tool_name":"Bash"'
 out=$(watch); [ -z "$out" ] || fail "再開は通知しない: $out"
 expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t001/meta.json)"
