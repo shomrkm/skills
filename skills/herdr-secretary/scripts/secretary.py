@@ -279,7 +279,14 @@ def suggest_rule(tool: dict) -> str | None:
             break
     if not words:
         return None
-    prefix = words[:2] if words[0] in TWO_WORD_COMMANDS and len(words) > 1 else words[:1]
+    # `git -C <dir> add` や `npm --prefix <dir> ci` の場所指定は飛ばし、サブコマンドで候補を作る
+    # （`Bash(git -C:*)` を許可すると push まで通ってしまう）
+    rest = words[1:]
+    while len(rest) >= 2 and rest[0] in ("-C", "--prefix", "--cwd", "--git-dir", "--work-tree", "--dir"):
+        rest = rest[2:]
+    if words[0] in TWO_WORD_COMMANDS and rest:
+        return f"Bash({words[0]} {rest[0]}:*)"
+    prefix = words[:1]
     return f"Bash({' '.join(prefix)}:*)"
 
 
@@ -653,7 +660,7 @@ PROMPT_TEMPLATE = """# タスク {id}: {title}
 - 完了条件を満たしたら `{result}` に、要約・変更したファイル・PR の URL（あれば）・残課題を書いてください。このファイルは完了したときにだけ作ってください。
 - 判断に迷ったら、作業を止めて質問してください。秘書が人間に取り次ぎます。
 - タスクフォルダのほかのファイル（meta.json など）は秘書が管理しているので、読み書きしなくて大丈夫です。
-- Bash は 1 回に 1 コマンドずつ実行してください（`;` `&&` `|` でつながない、`cd` しない、変数に入れない）。つなげると許可リストに当たらず、人間の確認待ちで止まります。
+- 作業場所を用意したら、最初に 1 回だけ `cd <作業場所>` してください。以降の Bash はそこで 1 回に 1 コマンドずつ実行してください（`;` `&&` `|` でつながない、`git -C` や `npm --prefix` を使わない、変数に入れない）。こうしないと許可リストに当たらず、人間の確認待ちで止まります。
 """
 
 
