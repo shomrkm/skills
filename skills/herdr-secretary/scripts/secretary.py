@@ -9,6 +9,8 @@
   inbox                      人間の判断が要るもの（blocked / review）を古い順に
   show ID                    タスクフォルダの中身（prompt / status / result）
   peek ID [--lines N]        作業エージェントの画面を少しだけ読む
+  reply ID TEXT              入力待ちの作業エージェントに秘書から返事を送る
+  permissions                許可待ちになったコマンドの集計（許可リストを育てる用）
   handback ID                manual（人間が介入中）を解除して秘書に戻す
   close ID                   タスクを閉じる（タブや作業場所は消さない）
   watch                      監視ループ。状態が変わったときだけ 1 行出力する
@@ -51,9 +53,13 @@ DEFAULT_CONFIG = {
     "max_parallel": 10,
     "snapshot_interval_sec": 180,
     "silence_alert_min": 30,
-    "manual_timeout_min": 0,
+    "long_tool_alert_min": 120,
+    "manual_timeout_min": 15,
+    "review_backlog_alert": 5,
+    "notify": "auto",
     "poll_interval_sec": 1.0,
     "herdr_bin": "herdr",
+    "herdr_send_args": ["agent", "prompt", "{pane}", "{text}"],
 }
 
 
@@ -198,19 +204,45 @@ def apply_event(meta: dict, ev: dict) -> str | None:
         if status in (MANUAL, REVIEW):
             return None
         msg = (ev.get("message") or "").strip()
-        if status == BLOCKED and meta.get("reason", "").startswith("入力待ち"):
+        is_permission = "permission" in msg.lower() or "許可" in msg
+        if status == BLOCKED and meta.get("reason", "").startswith("入力待ち") and not is_permission:
             # Stop の後の「入力待ちです」通知は同じ意味なので重ねない
-            if "permission" not in msg.lower() and "許可" not in msg:
-                return None
+            return None
+        if is_permission and meta.get("pending_tool"):
+            # 直前に始めようとしたツールが許可待ちの対象。何を許可すればいいかが一目で分かるようにする
+            tool = meta["pending_tool"]
+            record_permission(meta["id"], tool)
+            return transition(meta, BLOCKED, f"許可待ち: {tool['label']}")
         return transition(meta, BLOCKED, f"許可待ち: {msg[:80]}" if msg else "許可待ち")
 
+    if name == "PreToolUse":
+        meta["pending_tool"] = {"name": ev.get("tool", ""), "label": tool_label(ev), "started_at": meta["last_event_at"]}
+        return None
+
     if name == "PostToolUse":
+        meta.pop("pending_tool", None)
         # 許可されて作業が再開した
         if status == BLOCKED:
             return transition(meta, RUNNING, "再開")
         return None
 
     return None
+
+
+def tool_label(ev: dict) -> str:
+    """許可待ちの通知に出す短い説明。Bash ならコマンド、ファイル操作ならパス。"""
+    tool = ev.get("tool", "")
+    inp = ev.get("input") or {}
+    detail = inp.get("command") or inp.get("file_path") or inp.get("url") or inp.get("pattern") or ""
+    detail = " ".join(str(detail).split())
+    if len(detail) > 100:
+        detail = detail[:97] + "..."
+    return f"{tool} `{detail}`" if detail else tool
+
+
+def record_permission(task_id: str, tool: dict) -> None:
+    with open(home() / "permissions.jsonl", "a") as f:
+        f.write(json.dumps({"time": now_iso(), "task_id": task_id, **tool}, ensure_ascii=False) + "\n")
 
 
 def periodic_checks(meta: dict, cfg: dict, live_panes: set[str] | None) -> str | None:
@@ -226,15 +258,26 @@ def periodic_checks(meta: dict, cfg: dict, live_panes: set[str] | None) -> str |
     timeout = cfg.get("manual_timeout_min", 0)
     if status == MANUAL and timeout:
         if now - parse_iso(meta.get("last_human_at") or meta.get("status_since")) > timeout * 60:
-            return transition(meta, BLOCKED if not has_result(meta["id"]) else REVIEW,
-                              "介入が止まったので秘書に戻した")
+            # 人間の入力が途切えた。作業エージェントはまだ動いているかもしれないので running に戻し、
+            # 次に止まったときは秘書が通知する
+            if take_new_result(meta):
+                return transition(meta, REVIEW, f"{timeout} 分介入がないので秘書に戻した")
+            transition(meta, RUNNING, f"{timeout} 分介入がないので秘書に戻した")
+            return format_line(meta, MANUAL)
 
-    silence = cfg.get("silence_alert_min", 0)
-    if status == RUNNING and silence and not meta.get("silence_alerted"):
-        last = parse_iso(meta.get("last_event_at") or meta.get("started_at"))
-        if last and now - last > silence * 60:
+    if status == RUNNING and not meta.get("silence_alerted"):
+        tool = meta.get("pending_tool")
+        if tool:
+            # テストの全件実行など、長いコマンドの実行中はイベントが来ないので長めに待つ
+            limit, since = cfg.get("long_tool_alert_min", 0), parse_iso(tool.get("started_at"))
+            msg = f"異常: {tool['label']} が {limit} 分終わらない"
+        else:
+            limit = cfg.get("silence_alert_min", 0)
+            since = parse_iso(meta.get("last_event_at") or meta.get("started_at"))
+            msg = f"異常: {limit} 分イベントなし"
+        if limit and since and now - since > limit * 60:
             meta["silence_alerted"] = True
-            return transition(meta, BLOCKED, f"異常: {silence} 分イベントなし")
+            return transition(meta, BLOCKED, msg)
     return None
 
 
@@ -283,6 +326,11 @@ class Herdr:
 
     def pane_read(self, pane: str, lines: int) -> str:
         return self._run("pane", "read", pane, "--source", "recent", "--lines", str(lines))
+
+    def send(self, pane: str, text: str, cfg: dict) -> None:
+        """作業エージェントに入力を送る。書き方は config の herdr_send_args で変えられる。"""
+        args = [a.replace("{pane}", pane).replace("{text}", text) for a in cfg["herdr_send_args"]]
+        self._run(*args)
 
 
 def _collect_pane_ids(node) -> list[str]:
@@ -366,6 +414,16 @@ REPOS_TEMPLATE = """# 作業対象のリポジトリ
 """
 
 
+SECRETARY_CLAUDE_MD = """# 秘書エージェント
+
+あなたは shomrkm の秘書エージェント。振る舞いはすべて {skill} に従う。最初に必ず読むこと。
+
+- セッションを始めたら、すぐに Monitor ツールで `{sec} watch` を起動する（起動済みなら不要）
+- 続けて `{sec} list` と `{sec} inbox` を確認し、判断待ちがあれば最初に伝える
+- 自分ではコードを書かない
+"""
+
+
 def cmd_init(args) -> int:
     h = home()
     tasks_dir().mkdir(parents=True, exist_ok=True)
@@ -381,6 +439,8 @@ def cmd_init(args) -> int:
     hook = [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}]
     settings = {
         "permissions": {
+            # ファイル編集の確認で止まらないようにする。Bash などは許可リストで育てる（sec permissions）
+            "defaultMode": "acceptEdits",
             "additionalDirectories": [str(tasks_dir())],
             "allow": [f"Edit(/{tasks_dir()}/**)", f"Read(/{tasks_dir()}/**)"],
         },
@@ -388,6 +448,7 @@ def cmd_init(args) -> int:
             "UserPromptSubmit": hook,
             "Stop": hook,
             "Notification": hook,
+            "PreToolUse": [{"matcher": "*", "hooks": hook[0]["hooks"]}],
             "PostToolUse": [{"matcher": "*", "hooks": hook[0]["hooks"]}],
         },
     }
@@ -398,10 +459,50 @@ def cmd_init(args) -> int:
     wrapper = bin_dir / "sec"
     wrapper.write_text(f'#!/bin/sh\nexec python3 {shlex.quote(str(SCRIPT_PATH))} "$@"\n')
     wrapper.chmod(0o755)
+
+    # `cd ~/secretary && claude` だけで秘書として動き出すようにする
+    claude_md = h / "CLAUDE.md"
+    if not claude_md.exists():
+        claude_md.write_text(SECRETARY_CLAUDE_MD.format(skill=SCRIPT_PATH.parent.parent / "SKILL.md", sec=wrapper))
+    sec_settings_dir = h / ".claude"
+    sec_settings_dir.mkdir(exist_ok=True)
+    sec_settings = sec_settings_dir / "settings.json"
+    if not sec_settings.exists():
+        sec_settings.write_text(json.dumps({"permissions": {"allow": [
+            f"Bash({wrapper}:*)", f"Read(/{h}/**)",
+        ]}}, ensure_ascii=False, indent=2) + "\n")
+
     print(f"初期化しました: {h}")
-    print(f"- repos.md に作業対象のリポジトリを書いてください: {repos}")
-    print(f"- CLI: {wrapper}")
+    print(f"1. repos.md に作業対象のリポジトリを書いてください: {repos}")
+    print(f"2. herdr のペインで `cd {h} && claude` を実行すると、秘書として動き出します")
     return 0
+
+
+def load_repos() -> dict[str, Path]:
+    """repos.md の `- 名前: パス — 説明` を読む。"""
+    p = home() / "repos.md"
+    repos: dict[str, Path] = {}
+    if not p.exists():
+        return repos
+    in_comment = False
+    for line in p.read_text().splitlines():
+        if "<!--" in line:
+            in_comment = True
+        if not in_comment:
+            m = re.match(r"\s*-\s*([^:\s]+)\s*:\s*(\S+)", line)
+            if m:
+                repos[m.group(1)] = Path(m.group(2)).expanduser()
+        if "-->" in line:
+            in_comment = False
+    return repos
+
+
+def resolve_repo(arg: str) -> Path | None:
+    repos = load_repos()
+    if arg in repos and repos[arg].is_dir():
+        return repos[arg].resolve()
+    p = Path(arg).expanduser()
+    return p.resolve() if p.is_dir() else None
 
 
 def next_id() -> str:
@@ -439,9 +540,10 @@ def cmd_new(args) -> int:
     if not request:
         print("依頼内容が空です。", file=sys.stderr)
         return 2
-    repo = Path(args.repo).expanduser().resolve()
-    if not repo.is_dir():
-        print(f"リポジトリが見つかりません: {repo}", file=sys.stderr)
+    repo = resolve_repo(args.repo)
+    if repo is None:
+        names = ", ".join(load_repos()) or "（repos.md が空）"
+        print(f"リポジトリが見つかりません: {args.repo}（repos.md の名前: {names}）", file=sys.stderr)
         return 2
 
     cfg = load_config()
@@ -522,6 +624,47 @@ def cmd_peek(args) -> int:
     return 0
 
 
+def cmd_reply(args) -> int:
+    meta = read_meta(args.id)
+    if not meta.get("pane"):
+        print("まだ起動していません。", file=sys.stderr)
+        return 1
+    cfg = load_config()
+    try:
+        Herdr(cfg).send(meta["pane"], f"{SECRETARY_MARK} {args.text}", cfg)
+    except Exception as e:
+        print(f"送れませんでした（{e}）。ペイン {meta['pane']} で直接入力してください。"
+              "herdr の送信コマンドが違う場合は config.json の herdr_send_args を直してください。", file=sys.stderr)
+        return 1
+    with locked():
+        meta = read_meta(args.id)
+        if meta["status"] == BLOCKED:
+            transition(meta, RUNNING, "秘書が返事を送った")
+            write_meta(meta)
+    print(f"{args.id} に送りました。")
+    return 0
+
+
+def cmd_permissions(args) -> int:
+    """許可待ちになったツールを多い順に。繰り返し止められるものは許可リストに入れる候補。"""
+    p = home() / "permissions.jsonl"
+    if not p.exists():
+        print("まだ許可待ちの記録はありません。")
+        return 0
+    counts: dict[str, set[str]] = {}
+    for raw in p.read_text().splitlines():
+        try:
+            r = json.loads(raw)
+        except Exception:
+            continue
+        counts.setdefault(r.get("label", r.get("name", "?")), set()).add(r["task_id"])
+    rows = sorted(counts.items(), key=lambda kv: -len(kv[1]))
+    for label, tids in rows[: args.top]:
+        print(f"- {len(tids)} タスク: {label}")
+    print("\n何度も止められているものは、worker-settings.json の permissions.allow に入れると止まらなくなります。")
+    return 0
+
+
 def cmd_handback(args) -> int:
     with locked():
         meta = read_meta(args.id)
@@ -561,6 +704,10 @@ def cmd_hook(args) -> int:
         ev["from_secretary"] = (data.get("prompt") or "").lstrip().startswith(SECRETARY_MARK)
     elif ev["event"] == "Notification":
         ev["message"] = data.get("message", "")
+    elif ev["event"] == "PreToolUse":
+        ev["tool"] = data.get("tool_name", "")
+        inp = data.get("tool_input") or {}
+        ev["input"] = {k: inp[k] for k in ("command", "file_path", "url", "pattern") if k in inp}
     elif ev["event"] == "PostToolUse":
         ev["tool"] = data.get("tool_name", "")
     line = json.dumps(ev, ensure_ascii=False) + "\n"
@@ -572,7 +719,46 @@ def cmd_hook(args) -> int:
     return 0
 
 
+def notify(line: str, cfg: dict) -> None:
+    """席を外していても気づけるように、デスクトップ通知も出す（macOS は osascript）。"""
+    mode = cfg.get("notify", "auto")
+    if not mode or mode == "off":
+        return
+    text = line.removeprefix("[secretary] ")
+    try:
+        if mode == "auto":
+            if shutil.which("osascript"):
+                script = f"display notification {json.dumps(text)} with title \"秘書\""
+                subprocess.run(["osascript", "-e", script], timeout=5, capture_output=True)
+            elif shutil.which("notify-send"):
+                subprocess.run(["notify-send", "秘書", text], timeout=5, capture_output=True)
+        else:
+            subprocess.run(mode.replace("{text}", shlex.quote(text)), shell=True, timeout=5, capture_output=True)
+    except Exception:
+        pass
+
+
+def take_over_watch() -> None:
+    """監視ループは 1 本だけにする。秘書を再起動したら、新しい監視が古いほうを止めて引き継ぐ
+    （古いほうの出力は、もういない秘書のセッションに流れているため）。"""
+    import signal
+    pid_path = home() / ".watch.pid"
+    if pid_path.exists():
+        try:
+            old = int(pid_path.read_text())
+            if old != os.getpid():
+                os.kill(old, signal.SIGTERM)
+                for _ in range(50):
+                    os.kill(old, 0)
+                    time.sleep(0.1)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    pid_path.write_text(str(os.getpid()))
+
+
 def cmd_watch(args) -> int:
+    if not args.once:
+        take_over_watch()
     cfg = load_config()
     herdr = Herdr(cfg)
     offset_path = home() / ".watch-offset"
@@ -586,6 +772,8 @@ def cmd_watch(args) -> int:
         lines: list[str] = []
         with locked():
             # 1. hook のイベントを反映
+            if offset_path.exists():
+                offset = int(offset_path.read_text() or 0)
             size = events_path().stat().st_size if events_path().exists() else 0
             if size < offset:
                 offset = 0
@@ -624,8 +812,18 @@ def cmd_watch(args) -> int:
             # 3. 空きがあればキューから起動
             lines.extend(fill_slots(cfg, herdr))
 
+        backlog = sum(1 for m in all_metas() if m["status"] == REVIEW)
+        limit = cfg.get("review_backlog_alert", 0)
+        flag = home() / ".backlog-alerted"
+        if limit and backlog >= limit and not flag.exists():
+            flag.touch()
+            lines.append(f"[secretary] レビュー待ちが {backlog} 件たまっています")
+        elif flag.exists() and backlog < limit:
+            flag.unlink()
+
         for line in lines:
             print(line, flush=True)
+            notify(line, cfg)
         if args.once:
             return 0
         time.sleep(cfg["poll_interval_sec"])
@@ -661,6 +859,15 @@ def main(argv=None) -> int:
     s.add_argument("id")
     s.add_argument("--lines", type=int, default=30)
     s.set_defaults(func=cmd_peek)
+
+    s = sub.add_parser("reply")
+    s.add_argument("id")
+    s.add_argument("text")
+    s.set_defaults(func=cmd_reply)
+
+    s = sub.add_parser("permissions")
+    s.add_argument("--top", type=int, default=20)
+    s.set_defaults(func=cmd_permissions)
 
     s = sub.add_parser("close")
     s.add_argument("id")

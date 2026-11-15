@@ -14,6 +14,7 @@ d=json.load(open(p)); d["panes"].append({"id":f"w{n}:p1"}); json.dump(d,open(p,"
 PY
     ;;
   "pane run") ;;
+  "agent prompt") ;;
   "pane read") echo "(fake screen of $3)" ;;
   *) echo "unknown: $*" >&2; exit 1 ;;
 esac
