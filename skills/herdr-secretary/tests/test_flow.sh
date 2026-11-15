@@ -18,7 +18,7 @@ python3 - <<PY
 import json; p="$SECRETARY_HOME/config.json"; c=json.load(open(p)); c["max_parallel"]=2; c["snapshot_interval_sec"]=0; c["notify"]="off"; c["review_backlog_alert"]=2; json.dump(c,open(p,"w"))
 PY
 
-echo "- myrepo: $REPO — テスト用" >> "$SECRETARY_HOME/repos.md"
+echo "- myrepo: $REPO — テスト用（worktrees: ../wt）" >> "$SECRETARY_HOME/repos.md"
 
 # 完了条件なしは拒否
 if $SEC new --repo "$REPO" --title x --request y 2>/dev/null; then fail "done なしで登録できた"; fi
@@ -34,6 +34,7 @@ grep -q "\"tab\", \"create\", \"--cwd\", \"$REPO\"" "$LOG" || fail "リポジト
 grep -q '"--env", "SECRETARY_TASK_ID=t001"' "$LOG" || fail "タスク ID を環境変数で渡していない"
 grep -qE '"agent", "start", "t001-[0-9a-f]{6}", "--kind", "claude", "--pane", "w1:p1"' "$LOG" || fail "agent start が呼ばれていない"
 grep -q '"--", "--settings", ".*worker-settings.json"' "$LOG" || fail "worker-settings を渡していない"
+grep -q "\"--add-dir\", \"$TMP/wt\"" "$LOG" || fail "リポジトリの worktree 置き場を --add-dir で渡していない"
 grep -qE '"agent", "prompt", "t001-[0-9a-f]{6}", "\[secretary\] .*prompt.md' "$LOG" || fail "最初の指示を送っていない"
 
 # 秘書からの最初のプロンプトは介入扱いにしない

@@ -350,6 +350,15 @@ def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], set[str]] | Non
 # - herdr のペインの中（HERDR_ENV=1）から呼ぶと、そのセッションを操作する
 # ---------------------------------------------------------------------------
 
+def worker_extra_args(meta: dict) -> list[str]:
+    extra = []
+    wt = repo_worktrees_dir(Path(meta["repo"]))
+    if wt:
+        wt.mkdir(parents=True, exist_ok=True)
+        extra += ["--add-dir", str(wt)]
+    return extra
+
+
 def agent_name(meta: dict) -> str:
     """herdr のエージェント名。閉じたタスクのエージェントや別の秘書ディレクトリと衝突しないよう、
     タスク ID に秘書ディレクトリごとの短い識別子を付ける（[a-z][a-z0-9_-]{0,31}）。"""
@@ -423,7 +432,8 @@ class Herdr:
         for attempt in range(20):
             try:
                 self._run("agent", "start", agent_name(meta), "--kind", "claude", "--pane", pane,
-                          "--timeout", "60000", "--", "--settings", str(settings), timeout=90)
+                          "--timeout", "60000", "--", "--settings", str(settings),
+                          *worker_extra_args(meta), timeout=90)
                 return pane
             except HerdrError as e:
                 if e.code != "agent_pane_busy" or attempt == 19:
@@ -494,10 +504,13 @@ def fill_slots(cfg: dict, herdr: Herdr) -> list[str]:
 REPOS_TEMPLATE = """# 作業対象のリポジトリ
 
 秘書はこの一覧から依頼の対象を選ぶ。1 行に 1 リポジトリ。
-書式: `- 名前: 絶対パス — 何のリポジトリか`
+書式: `- 名前: 絶対パス — 何のリポジトリか（worktrees: <パス>）`
+
+リポジトリのルールで worktree をリポジトリの外に作るなら、その場所を `（worktrees: ...）` に書く
+（リポジトリからの相対パスでもいい）。作業エージェントがそこを確認なしで触れるようになる。
 
 <!-- 例
-- evaluation-api: /Users/you/src/evaluation-api — 人事評価のバックエンド（Rails）
+- evaluation-api: /Users/you/src/evaluation-api — 人事評価のバックエンド（Rails）（worktrees: ../evaluation-api-worktrees）
 - evaluation-web: /Users/you/src/evaluation-web — 人事評価のフロントエンド（React / TypeScript）
 -->
 """
@@ -570,6 +583,23 @@ def cmd_init(args) -> int:
     print(f"1. repos.md に作業対象のリポジトリを書いてください: {repos}")
     print(f"2. herdr のペインで `cd {h} && claude` を実行すると、秘書として動き出します")
     return 0
+
+
+def repo_worktrees_dir(repo: Path) -> Path | None:
+    """repos.md でそのリポジトリに `（worktrees: <パス>）` が書かれていれば、その絶対パス。
+    リポジトリのルールで worktree をリポジトリの外に作る場合、作業エージェントがそこを
+    確認なしで触れるように `claude --add-dir` で渡す。"""
+    p = home() / "repos.md"
+    if not p.exists():
+        return None
+    for line in p.read_text().splitlines():
+        m = re.match(r"\s*-\s*[^:\s]+\s*:\s*(\S+)", line)
+        if m and Path(m.group(1)).expanduser().resolve() == repo.resolve():
+            w = re.search(r"worktrees:\s*([^\s）)]+)", line)
+            if w:
+                d = Path(w.group(1)).expanduser()
+                return (d if d.is_absolute() else repo / d).resolve()
+    return None
 
 
 def load_repos() -> dict[str, Path]:
