@@ -68,6 +68,21 @@ out=$(watch); [ -z "$out" ] || fail "秘書の返事で通知: $out"
 hook t001 Stop
 out=$(watch); expect "running→blocked 入力待ち" "$out"
 
+# バックグラウンドのサブエージェントの完了通知もユーザーターンとして届くが、人間の介入ではない。作業は再開する
+hook t001 UserPromptSubmit ',"prompt":"<task-notification><task-id>a1</task-id><status>completed</status></task-notification>"'
+out=$(watch); [ -z "$out" ] || fail "完了通知を介入扱いした: $out"
+expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t001/meta.json)"
+
+# 選択式の質問にペインで答えても介入扱いにしない（回答では UserPromptSubmit は来ず、PostToolUse で再開する）
+hook t001 PreToolUse ',"tool_name":"AskUserQuestion","tool_input":{}'
+hook t001 PermissionRequest ',"tool_name":"AskUserQuestion","tool_input":{}'
+out=$(watch); expect "running→blocked 許可待ち: AskUserQuestion" "$out"
+hook t001 PostToolUse ',"tool_name":"AskUserQuestion"'
+out=$(watch); [ -z "$out" ] || fail "質問への回答で通知: $out"
+expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t001/meta.json)"
+hook t001 Stop
+out=$(watch); expect "running→blocked 入力待ち" "$out"
+
 # ダイアログ中は文字で答えられないので、ペインに誘導する
 echo t001 > "$FAKE_HERDR_STATE.blocked"
 if out=$($SEC reply t001 "yes" 2>&1); then fail "ダイアログ中に送れてしまった"; fi

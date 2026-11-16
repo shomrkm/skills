@@ -54,6 +54,8 @@ herdr のエラーは次のように扱う。
 herdr は Claude Code の起動直後の画面（初回の案内など）を「入力待ち」と判定することがある。その場合、最初の指示はその画面に吸い込まれる。そのため、最初の指示が hook（UserPromptSubmit）で届いたことを 30 秒以内に確認できなければ、blocked として知らせる。Enter を自動で送り直すことはしない（フォルダの信頼確認は、既定の選択肢が「No, exit」）。
 - `agent_blocked`：許可や選択肢のダイアログが出ている。`sec reply` は送らず、ペインで答えるよう案内する
 
+UserPromptSubmit が来たら、prompt の先頭で送り手を見分ける。`[secretary]` は秘書、`<task-notification>` は Claude Code 自身（バックグラウンドのサブエージェントやコマンドの完了通知）、それ以外は人間の直接指示として manual にする。許可ダイアログや選択式の質問（AskUserQuestion）にペインで答えても UserPromptSubmit は来ない（PostToolUse で running に戻る）。
+
 herdr のバージョンを上げて動かなくなったら、`herdr agent` と `herdr tab` のヘルプを見て `Herdr` クラスを直す。
 
 ## 4. 動作確認
