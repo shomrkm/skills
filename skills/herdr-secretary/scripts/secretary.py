@@ -9,13 +9,16 @@
   inbox                      人間の判断が要るもの（blocked / review）を古い順に
   show ID                    タスクフォルダの中身（prompt / status / result）
   peek ID [--lines N]        作業エージェントの画面を少しだけ読む
-  reply ID TEXT              入力待ちの作業エージェントに秘書から返事を送る
+  reply ID TEXT              入力待ち・レビュー中の作業エージェントに秘書から返事を送る
+  choose ID N                選択式の質問（AskUserQuestion）で N 番の選択肢を選ぶ
   permissions                許可待ちになったコマンドの集計と、許可ルールの候補
   allow RULE...              作業エージェントの許可リストにルールを足す（例: "Bash(git worktree:*)"）
   retry ID                   最初の指示を送り直す（起動画面で止まっていたとき）
   handback ID                manual（人間が介入中）を解除して秘書に戻す
   close ID                   タスクを閉じる（タブや作業場所は消さない）
-  watch                      監視ループ。状態が変わったときだけ 1 行出力する
+  cleanup ID [--yes]         閉じたタスクのタブと worktree を片付ける（--yes なしは確認だけ）
+  doctor                     herdr の版・サーバー、hook の向き先、スキルの更新漏れを確かめる
+  watch                     監視ループ。状態が変わったときだけ 1 行出力する
   hook                       作業エージェントの Claude Code hook から呼ばれる
 
 秘書ディレクトリは $SECRETARY_HOME（既定は ~/secretary）。
@@ -53,6 +56,14 @@ CLOSED = "closed"
 ACTIVE = {RUNNING, BLOCKED, MANUAL}          # 並列数に数える状態
 NOTIFY_TO = {BLOCKED, REVIEW, MANUAL}        # この状態に入ったら通知する
 
+# agent start --kind / --pane、agent list の agent_status、status --json がそろう版
+MIN_HERDR_VERSION = (0, 9, 5)
+
+# Claude Code が許可リストや acceptEdits があっても毎回確認するパス
+PROTECTED_DIRS = (".claude",)
+
+QUESTION_TOOL = "AskUserQuestion"
+
 DEFAULT_CONFIG = {
     "max_parallel": 10,
     "snapshot_interval_sec": 180,
@@ -61,6 +72,8 @@ DEFAULT_CONFIG = {
     "manual_timeout_min": 15,
     "first_prompt_ack_sec": 30,
     "review_backlog_alert": 5,
+    "permission_repeat_quiet_min": 10,
+    "update_check": True,
     "notify": "auto",
     "poll_interval_sec": 1.0,
     "herdr_bin": "herdr",
@@ -180,7 +193,37 @@ def format_line(meta: dict, old: str) -> str:
     return f"[secretary] {meta['id']} {old}→{meta['status']}{reason} — {meta['title']}"
 
 
-def apply_event(meta: dict, ev: dict) -> str | None:
+def wait_for_human(meta: dict, tool: dict, cfg: dict | None = None) -> str | None:
+    """ツールが人間の操作待ちになった（許可ダイアログか選択式の質問）。"""
+    if tool.get("name") == QUESTION_TOOL:
+        return transition(meta, BLOCKED, f"選択待ち: {question_summary(tool.get('questions'))}")
+    record_permission(meta["id"], tool)
+    line = transition(meta, BLOCKED, f"許可待ち: {tool['label']}{'（保護パス）' if is_protected(tool) else ''}")
+    # 人間が許可した直後に同じ種類の許可待ちが続くとき（.claude/ の Edit が何回も、など）は、ペインを見ている
+    # はずなので通知を重ねない。状態は blocked にするので、受信箱には出る
+    if not line:
+        return None
+    key = permission_key(tool)
+    quiet = (cfg or DEFAULT_CONFIG).get("permission_repeat_quiet_min", 0) * 60
+    last = meta.get("last_permission") or {}
+    if quiet and last.get("key") == key and parse_iso(meta["last_event_at"]) - parse_iso(last.get("notified_at")) < quiet:
+        return None
+    meta["last_permission"] = {"key": key, "notified_at": meta["last_event_at"]}
+    return line
+
+
+def question_summary(questions: list | None) -> str:
+    """選択式の質問を 1 行にする。秘書が画面を読まずに人間へ取り次げるように。"""
+    if not questions:
+        return QUESTION_TOOL
+    q = questions[0]
+    opts = " ".join(f"[{i}] {o}" for i, o in enumerate(q.get("options") or [], 1))
+    rest = f"（ほか {len(questions) - 1} 問）" if len(questions) > 1 else ""
+    multi = "（複数選択）" if q.get("multiSelect") else ""
+    return f"{q.get('question', '')}{multi} {opts}{rest}".strip()
+
+
+def apply_event(meta: dict, ev: dict, cfg: dict | None = None) -> str | None:
     """hook のイベント 1 件を状態に反映する。"""
     status = meta["status"]
     if status in (CLOSED, QUEUED):
@@ -219,24 +262,22 @@ def apply_event(meta: dict, ev: dict) -> str | None:
             return None
         if is_permission and status == BLOCKED and meta.get("reason", "").startswith("許可待ち"):
             return None  # PermissionRequest で通知済み
-        if is_permission and meta.get("pending_tool"):
+        if status == BLOCKED and meta.get("reason", "").startswith("選択待ち"):
+            return None
+        if meta.get("pending_tool") and (is_permission or asking_question(meta)):
             # 直前に始めようとしたツールが許可待ちの対象。何を許可すればいいかが一目で分かるようにする
-            tool = meta["pending_tool"]
-            record_permission(meta["id"], tool)
-            return transition(meta, BLOCKED, f"許可待ち: {tool['label']}")
+            return wait_for_human(meta, meta["pending_tool"], cfg)
         return transition(meta, BLOCKED, f"許可待ち: {msg[:80]}" if msg else "許可待ち")
 
     if name == "PermissionRequest":
         # Claude Code が許可ダイアログを出した（herdr 自身もこの hook で blocked を判定している）
         if status in (MANUAL, REVIEW):
             return None
-        tool = {"name": ev.get("tool", ""), "label": tool_label(ev), "started_at": meta["last_event_at"]}
-        meta["pending_tool"] = tool
-        record_permission(meta["id"], tool)
-        return transition(meta, BLOCKED, f"許可待ち: {tool['label']}")
+        meta["pending_tool"] = pending_tool(ev, meta["last_event_at"])
+        return wait_for_human(meta, meta["pending_tool"], cfg)
 
     if name == "PreToolUse":
-        meta["pending_tool"] = {"name": ev.get("tool", ""), "label": tool_label(ev), "started_at": meta["last_event_at"]}
+        meta["pending_tool"] = pending_tool(ev, meta["last_event_at"])
         return None
 
     if name in ("PostToolUse", "PostToolUseFailure"):
@@ -247,6 +288,27 @@ def apply_event(meta: dict, ev: dict) -> str | None:
         return None
 
     return None
+
+
+def pending_tool(ev: dict, at: str) -> dict:
+    inp = ev.get("input") or {}
+    tool = {"name": ev.get("tool", ""), "label": tool_label(ev), "started_at": at}
+    if inp.get("file_path"):
+        tool["path"] = inp["file_path"]
+    if inp.get("questions"):
+        tool["questions"] = inp["questions"]
+    return tool
+
+
+def is_protected(tool: dict) -> bool:
+    path = tool.get("path") or ""
+    return tool.get("name") != "Bash" and any(f"/{d}/" in f"/{path}" for d in PROTECTED_DIRS)
+
+
+def permission_key(tool: dict) -> str:
+    if is_protected(tool):
+        return "protected"
+    return suggest_rule(tool) or tool.get("label", "")
 
 
 def tool_label(ev: dict) -> str:
@@ -269,6 +331,8 @@ TWO_WORD_COMMANDS = {"git", "bundle", "npm", "pnpm", "yarn", "npx", "bin/rails",
 def suggest_rule(tool: dict) -> str | None:
     """許可待ちになったツールから、permissions.allow に入れるルールの候補を作る。"""
     name = tool.get("name", "")
+    if name == QUESTION_TOOL or is_protected(tool):
+        return None
     if name != "Bash":
         return name or None
     label = tool.get("label", "")
@@ -310,8 +374,14 @@ def record_permission(task_id: str, tool: dict) -> None:
         f.write(json.dumps({"time": now_iso(), "task_id": task_id, **tool}, ensure_ascii=False) + "\n")
 
 
-def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], set[str]] | None) -> str | None:
-    """イベントでは拾えない異常（ペイン消失・長時間無反応・manual の放置）を見る。"""
+HOOK_MISSING = "hook が届いていない可能性。sec doctor で確認"
+
+
+def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], dict[str, str]] | None,
+                    check_silence: bool = True) -> str | None:
+    """イベントでは拾えない異常（ペイン消失・長時間無反応・manual の放置）を見る。
+
+    check_silence が False のときは無反応の判定をしない（herdr の状態と突き合わせられる snapshot の周だけ判定する）。"""
     status = meta["status"]
     if status not in ACTIVE:
         return None
@@ -346,7 +416,7 @@ def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], set[str]] | Non
             transition(meta, RUNNING, f"{timeout} 分介入がないので秘書に戻した")
             return format_line(meta, MANUAL)
 
-    if status == RUNNING and not meta.get("silence_alerted"):
+    if status == RUNNING and check_silence and not meta.get("silence_alerted"):
         tool = meta.get("pending_tool")
         if tool:
             # テストの全件実行など、長いコマンドの実行中はイベントが来ないので長めに待つ
@@ -357,7 +427,17 @@ def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], set[str]] | Non
             since = parse_iso(meta.get("last_event_at") or meta.get("started_at"))
             msg = f"異常: {limit} 分イベントなし"
         if limit and since and now - since > limit * 60:
+            agent_status = live[1].get(agent_name(meta)) if live else None
+            if agent_status == "working":
+                return None  # herdr から見て動いている。次の snapshot でまた見る
             meta["silence_alerted"] = True
+            # hook が届かないと許可待ちや完了を見逃し、無反応に見える。herdr の見立てで状態を補正する
+            if agent_status == "blocked":
+                return transition(meta, BLOCKED, f"許可待ちか選択待ち（herdr で検知。{HOOK_MISSING}）")
+            if agent_status in ("idle", "done"):
+                if take_new_result(meta):
+                    return transition(meta, REVIEW, f"result.md あり（herdr で検知。{HOOK_MISSING}）")
+                return transition(meta, BLOCKED, f"入力待ち（herdr で検知。{HOOK_MISSING}）")
             return transition(meta, BLOCKED, msg)
     return None
 
@@ -398,12 +478,55 @@ class HerdrError(RuntimeError):
         self.code = code
 
 
+def parse_version(text: str) -> tuple[int, ...] | None:
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def version_str(v: tuple[int, ...]) -> str:
+    return ".".join(map(str, v))
+
+
+RESTART_SERVER_HINT = ("herdr のサーバーを再起動してください。すべてのペインのプロセス（作業中の Claude Code も）が止まるので、"
+                       "人間が作業を区切ってから `herdr server stop` を実行し、`herdr` で起動し直します。秘書からは実行しません")
+
+
 class Herdr:
     def __init__(self, cfg: dict):
         self.bin = os.environ.get("HERDR_BIN", cfg.get("herdr_bin", "herdr"))
 
     def available(self) -> bool:
         return shutil.which(self.bin) is not None
+
+    def check(self) -> list[str]:
+        """秘書が使う herdr の機能がそろっているか。足りなければ、人間がやることを 1 件ずつ返す。"""
+        if not self.available():
+            return [f"herdr が見つかりません（{self.bin}）。herdr {version_str(MIN_HERDR_VERSION)} 以上を入れてください"]
+        try:
+            r = subprocess.run([self.bin, "--version"], capture_output=True, text=True, timeout=10)
+            client = parse_version(r.stdout + r.stderr)
+        except Exception as e:
+            return [f"herdr --version が失敗しました（{e}）"]
+        if client is None or client < MIN_HERDR_VERSION:
+            # 古い herdr には agent start --kind / --pane がない（0.7.3 は unknown option: --kind で失敗する）
+            found = version_str(client) if client else "不明"
+            return [f"herdr が古いです（{found}）。{version_str(MIN_HERDR_VERSION)} 以上に上げてください（`herdr update`）。"
+                    "上げたあとはサーバーの再起動も必要です"]
+        try:
+            r = subprocess.run([self.bin, "status", "--json"], capture_output=True, text=True, timeout=10)
+            st = json.loads(r.stdout)
+        except Exception as e:
+            return [f"herdr status --json が失敗しました（{e}）"]
+        server = st.get("server") or {}
+        if not server.get("running"):
+            return ["herdr のサーバーが動いていません。herdr を起動し、そのペインの中で秘書を動かしてください"]
+        if not server.get("compatible", True) or not server.get("endpoint_compatible", True):
+            proto = (st.get("client") or {}).get("protocol")
+            return [f"herdr のクライアントとサーバーの protocol が合いません（サーバー {server.get('version')} / protocol "
+                    f"{server.get('protocol')}、クライアント {version_str(client)} / protocol {proto}）。{RESTART_SERVER_HINT}"]
+        if server.get("restart_needed") or server.get("server_binary_stale"):
+            return [f"herdr を更新したあと、サーバーが古いまま動いています（サーバー {server.get('version')}）。{RESTART_SERVER_HINT}"]
+        return []
 
     def _run(self, *args: str, timeout: int = 30) -> dict:
         r = subprocess.run([self.bin, *args], capture_output=True, text=True, timeout=timeout)
@@ -422,11 +545,22 @@ class Herdr:
     def pane_ids(self) -> set[str]:
         return {p["pane_id"] for p in self._run("pane", "list").get("panes", [])}
 
-    def agent_names(self) -> set[str]:
-        return {a["name"] for a in self._run("agent", "list").get("agents", []) if a.get("name")}
+    def agent_statuses(self) -> dict[str, str]:
+        """名前付きエージェントの agent_status（idle / working / blocked / done / unknown）。"""
+        return {a["name"]: a.get("agent_status", "unknown")
+                for a in self._run("agent", "list").get("agents", []) if a.get("name")}
 
-    def live(self) -> tuple[set[str], set[str]]:
-        return self.pane_ids(), self.agent_names()
+    def agent_names(self) -> set[str]:
+        return set(self.agent_statuses())
+
+    def live(self) -> tuple[set[str], dict[str, str]]:
+        return self.pane_ids(), self.agent_statuses()
+
+    def send_keys(self, agent: str, *keys: str) -> None:
+        self._run("agent", "send-keys", agent, *keys)
+
+    def close_tab(self, tab: str) -> None:
+        self._run("tab", "close", tab)
 
     def start_worker(self, meta: dict, settings: Path) -> str:
         """タブを作り（フォーカスは移さない）、そのペインで Claude Code を起動する。ペイン ID を返す。"""
@@ -511,7 +645,8 @@ def fill_slots(cfg: dict, herdr: Herdr) -> list[str]:
         try:
             line = launch(m, herdr)
         except Exception as e:  # 起動失敗は人間に知らせる
-            line = transition(m, BLOCKED, f"異常: 起動に失敗 ({e})")
+            hint = "。sec doctor で herdr の版とサーバーを確認" if isinstance(e, HerdrError) else ""
+            line = transition(m, BLOCKED, f"異常: 起動に失敗 ({e}){hint}")
         write_meta(m)
         if line:
             lines.append(line)
@@ -582,7 +717,13 @@ def cmd_init(args) -> int:
             "PostToolUseFailure": [{"matcher": "*", "hooks": hook[0]["hooks"]}],
         },
     }
-    (h / "worker-settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    ws_path = h / "worker-settings.json"
+    if ws_path.exists():
+        # init のやり直し（hook の向き先を直すなど）で、sec allow で育てた許可リストを消さない
+        with contextlib.suppress(Exception):
+            old_allow = json.loads(ws_path.read_text())["permissions"].get("allow", [])
+            settings["permissions"]["allow"] += [r for r in old_allow if r not in settings["permissions"]["allow"]]
+    ws_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
 
     bin_dir = h / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -605,6 +746,11 @@ def cmd_init(args) -> int:
     print(f"初期化しました: {h}")
     print(f"1. repos.md に作業対象のリポジトリを書いてください: {repos}")
     print(f"2. herdr のペインで `cd {h} && claude` を実行すると、秘書として動き出します")
+    problems = Herdr(load_config()).check()
+    if problems:
+        print("\nherdr について、起動の前に直すことがあります:")
+        for p in problems:
+            print(f"- {p}")
     return 0
 
 
@@ -696,6 +842,13 @@ def cmd_new(args) -> int:
         return 2
 
     cfg = load_config()
+    if not args.no_launch:
+        problems = Herdr(cfg).check()
+        if problems:
+            print("herdr の準備ができていないので登録しませんでした。人間に次のことを頼んでください:", file=sys.stderr)
+            for p in problems:
+                print(f"- {p}", file=sys.stderr)
+            return 3
     with locked():
         tid = next_id()
         d = task_dir(tid)
@@ -781,7 +934,10 @@ def cmd_reply(args) -> int:
     try:
         Herdr(load_config()).prompt(agent_name(meta), f"{SECRETARY_MARK} {args.text}")
     except HerdrError as e:
-        if e.code == "agent_blocked":
+        if e.code == "agent_blocked" and asking_question(meta):
+            print(f"{args.id} は選択式の質問を出しているので、文字では答えられません。"
+                  f"`sec choose {args.id} <番号>` で選ぶか、ペイン {meta['pane']} で直接答えてください。", file=sys.stderr)
+        elif e.code == "agent_blocked":
             print(f"{args.id} は許可や選択肢のダイアログを出しているので、文字では答えられません。"
                   f"ペイン {meta['pane']} で直接答えてください。", file=sys.stderr)
         else:
@@ -789,10 +945,45 @@ def cmd_reply(args) -> int:
         return 1
     with locked():
         meta = read_meta(args.id)
-        if meta["status"] == BLOCKED:
-            transition(meta, RUNNING, "秘書が返事を送った")
+        if meta["status"] in (BLOCKED, REVIEW):
+            # review 中に直しを頼んだら作業に戻る。次に result.md が書き直されたら、また review になる
+            transition(meta, RUNNING, "秘書が返事を送った" if meta["status"] == BLOCKED else "秘書が追加の指示を送った")
             write_meta(meta)
     print(f"{args.id} に送りました。")
+    return 0
+
+
+def asking_question(meta: dict) -> bool:
+    return (meta.get("pending_tool") or {}).get("name") == QUESTION_TOOL
+
+
+def cmd_choose(args) -> int:
+    """選択式の質問（AskUserQuestion）で、人間が選んだ番号の選択肢を選ぶ。
+    カーソルは先頭の選択肢にあるので、下へ (番号 - 1) 回動かして Enter を送る。"""
+    meta = read_meta(args.id)
+    if not meta.get("pane"):
+        print("まだ起動していません。", file=sys.stderr)
+        return 1
+    if not asking_question(meta):
+        # 許可ダイアログも番号付きの選択肢なので、取り違えて許可しないように選択式の質問だけに限る
+        print(f"{args.id} は選択式の質問を出していません（{meta['status']} {meta.get('reason', '')}）。"
+              "許可ダイアログはペインで人間が答えてください。", file=sys.stderr)
+        return 1
+    if args.number < 1:
+        print("番号は 1 から数えます。", file=sys.stderr)
+        return 2
+    herdr = Herdr(load_config())
+    name = agent_name(meta)
+    try:
+        if herdr.agent_statuses().get(name) not in ("blocked", None):
+            print(f"{args.id} の画面は選択待ちになっていません。`sec peek {args.id}` で確認してください。", file=sys.stderr)
+            return 1
+        herdr.send_keys(name, *(["down"] * (args.number - 1)), "enter")
+    except HerdrError as e:
+        print(f"送れませんでした（{e}）。ペイン {meta['pane']} で直接答えてください。", file=sys.stderr)
+        return 1
+    print(f"{args.id} で {args.number} 番を選びました。質問が複数あるときは次の質問に進むので、"
+          f"`sec peek {args.id}` で画面を確認してください。")
     return 0
 
 
@@ -804,13 +995,19 @@ def cmd_permissions(args) -> int:
         return 0
     allowed = set(json.loads((home() / "worker-settings.json").read_text())["permissions"].get("allow", []))
     rules: dict[str, dict] = {}
+    protected: dict[str, dict] = {}
     for raw in p.read_text().splitlines():
         try:
             r = json.loads(raw)
         except Exception:
             continue
-        rule = suggest_rule(r) or r.get("label", "?")
-        e = rules.setdefault(rule, {"tasks": set(), "count": 0, "example": r.get("label", "")})
+        if r.get("name") == QUESTION_TOOL:
+            continue
+        if is_protected(r):
+            bucket, key = protected, r.get("name", "?")
+        else:
+            bucket, key = rules, suggest_rule(r) or r.get("label", "?")
+        e = bucket.setdefault(key, {"tasks": set(), "count": 0, "example": r.get("label", "")})
         e["tasks"].add(r["task_id"])
         e["count"] += 1
     rows = sorted(rules.items(), key=lambda kv: -kv[1]["count"])
@@ -818,8 +1015,14 @@ def cmd_permissions(args) -> int:
         note = ("  ← 許可済みなのに止まった。複合コマンド（; や &&）か、作業ディレクトリの外を触ったのが原因"
                 if rule in allowed else "")
         print(f"- {e['count']} 回（{len(e['tasks'])} タスク）: {rule}    例: {e['example']}{note}")
-    print("\n止まってほしくないものは `sec allow '<ルール>'` で許可リストに足せます。"
-          "push やデプロイなど、人間が確認したい操作は足さないでください。")
+    if rows:
+        print("\n止まってほしくないものは `sec allow '<ルール>'` で許可リストに足せます。"
+              "push やデプロイなど、人間が確認したい操作は足さないでください。")
+    if protected:
+        dirs = " / ".join(f"{d}/" for d in PROTECTED_DIRS)
+        print(f"\n許可リストでは避けられないもの（{dirs} は Claude Code の保護パスで、allow や acceptEdits があっても毎回確認される）:")
+        for name, e in sorted(protected.items(), key=lambda kv: -kv[1]["count"]):
+            print(f"- {e['count']} 回（{len(e['tasks'])} タスク）: {name}    例: {e['example']}")
     return 0
 
 
@@ -887,6 +1090,134 @@ def cmd_close(args) -> int:
     return 0
 
 
+def git(*args: str, cwd: Path, timeout: int = 15) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+
+
+def task_worktrees(meta: dict) -> list[dict]:
+    """タスクの作業場所らしい worktree（リポジトリ本体は除く）。
+
+    作業エージェントはリポジトリのルールで場所を決めるので、既定の置き場、タスクフォルダの文書に出てくるパス、
+    パスやブランチ名にタスク ID を含むもの、を候補にする。"""
+    repo = Path(meta["repo"])
+    try:
+        r = git("worktree", "list", "--porcelain", cwd=repo)
+    except Exception:
+        return []
+    entries, cur = [], {}
+    for line in r.stdout.splitlines() + [""]:
+        if not line:
+            if cur:
+                entries.append(cur)
+            cur = {}
+        elif line.startswith("worktree "):
+            cur["path"] = line.removeprefix("worktree ")
+        elif line.startswith("branch "):
+            cur["branch"] = line.removeprefix("branch refs/heads/")
+    docs = "".join((task_dir(meta["id"]) / n).read_text() for n in ("status.md", "result.md")
+                   if (task_dir(meta["id"]) / n).exists())
+    id_re = re.compile(rf"(?<![0-9a-z]){re.escape(meta['id'])}(?![0-9])")
+    found = []
+    for e in entries[1:]:
+        path = e.get("path", "")
+        if (Path(path) == home() / "worktrees" / meta["id"] or path in docs
+                or id_re.search(Path(path).name) or id_re.search(e.get("branch", ""))):
+            with contextlib.suppress(Exception):
+                e["dirty"] = bool(git("status", "--porcelain", cwd=Path(path)).stdout.strip())
+            found.append(e)
+    return found
+
+
+def cmd_cleanup(args) -> int:
+    """閉じたタスクのタブと worktree を片付ける。--yes がなければ、何を消すかを出すだけ。"""
+    cfg = load_config()
+    meta = read_meta(args.id)
+    if meta["status"] != CLOSED:
+        print(f"{args.id} はまだ閉じていません（{meta['status']}）。先に `sec close {args.id}` してください。", file=sys.stderr)
+        return 1
+    herdr = Herdr(cfg)
+    tab_alive = False
+    if meta.get("tab") and not args.keep_tab:
+        with contextlib.suppress(Exception):
+            tab_alive = meta.get("pane") in herdr.pane_ids()
+    worktrees = [] if args.keep_worktree else task_worktrees(meta)
+
+    print(f"{args.id} の片付け:")
+    print(f"- タブ {meta['tab']} を閉じる（中の Claude Code も終わる）" if tab_alive else "- 閉じるタブはありません")
+    for w in worktrees:
+        note = "  ← 未コミットの変更あり。消せません" if w.get("dirty") else ""
+        print(f"- worktree {w['path']}（ブランチ {w.get('branch', '-')} は残す）を git worktree remove で消す{note}")
+    if not args.keep_worktree and not worktrees:
+        print("- タスクの worktree は見つかりませんでした（リポジトリのルールで別の名前にしているかもしれません）")
+    if not args.yes:
+        print(f"\n人間の確認を取ってから `sec cleanup {args.id} --yes` で実行してください。"
+              "リポジトリに worktree の消し方のルールがあれば、そちらに従ってください。")
+        return 0
+
+    failed = False
+    if tab_alive:
+        try:
+            herdr.close_tab(meta["tab"])
+            print(f"タブ {meta['tab']} を閉じました。")
+        except HerdrError as e:
+            failed = True
+            print(f"タブを閉じられませんでした（{e}）。", file=sys.stderr)
+    for w in worktrees:
+        r = git("worktree", "remove", w["path"], cwd=Path(meta["repo"]))
+        if r.returncode == 0:
+            print(f"worktree {w['path']} を消しました。")
+        else:
+            failed = True
+            print(f"worktree {w['path']} を消せませんでした（{r.stderr.strip()}）。", file=sys.stderr)
+    with locked():
+        meta = read_meta(args.id)
+        meta["cleaned_at"] = now_iso()
+        write_meta(meta)
+    return 1 if failed else 0
+
+
+def skill_update_problems(fetch: bool = True) -> list[str]:
+    """hook はこのスクリプトを直接読む。修正がマージされても、手元のリポジトリを pull するまで効かない。"""
+    repo = SCRIPT_PATH.parent
+    try:
+        root = git("rev-parse", "--show-toplevel", cwd=repo).stdout.strip()
+        if not root:
+            return []
+        if fetch:
+            git("fetch", "--quiet", cwd=repo)
+        r = git("rev-list", "--count", "HEAD..@{u}", cwd=repo)
+    except Exception:
+        return []
+    behind = int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+    if not behind:
+        return []
+    return [f"スキルのリポジトリ（{root}）が upstream より {behind} コミット遅れています。hook はここのスクリプトを"
+            f"直接読むので、マージされた修正は pull するまで効きません。{root} で git pull したら、sec watch も起動し直してください"]
+
+
+def hook_script_problems() -> list[str]:
+    p = home() / "worker-settings.json"
+    if not p.exists():
+        return [f"{p} がありません。sec init を実行してください"]
+    commands = {h.get("command", "") for entries in json.loads(p.read_text()).get("hooks", {}).values()
+                for e in entries for h in e.get("hooks", [])}
+    stale = sorted(c for c in commands if str(SCRIPT_PATH) not in c)
+    if stale:
+        return [f"作業エージェントの hook が別の場所のスクリプトを呼んでいます（{stale[0]}）。"
+                f"{SCRIPT_PATH} で sec init をやり直してください（許可リストは残ります）"]
+    return []
+
+
+def cmd_doctor(args) -> int:
+    problems = Herdr(load_config()).check() + hook_script_problems() + skill_update_problems(fetch=not args.no_fetch)
+    if not problems:
+        print("問題ありません。")
+        return 0
+    for p in problems:
+        print(f"- {p}")
+    return 1
+
+
 def hook_task_id() -> str | None:
     """hook を呼んだ作業エージェントのタスク ID。
 
@@ -923,6 +1254,11 @@ def cmd_hook(args) -> int:
         ev["tool"] = data.get("tool_name", "")
         inp = data.get("tool_input") or {}
         ev["input"] = {k: inp[k] for k in ("command", "file_path", "url", "pattern") if k in inp}
+        if isinstance(inp.get("questions"), list):
+            ev["input"]["questions"] = [
+                {"question": q.get("question", ""), "multiSelect": bool(q.get("multiSelect")),
+                 "options": [o.get("label", "") for o in q.get("options") or [] if isinstance(o, dict)]}
+                for q in inp["questions"] if isinstance(q, dict)]
     elif ev["event"] in ("PostToolUse", "PostToolUseFailure"):
         ev["tool"] = data.get("tool_name", "")
     line = json.dumps(ev, ensure_ascii=False) + "\n"
@@ -982,6 +1318,9 @@ def cmd_watch(args) -> int:
     use_snapshot = herdr.available()
     if not use_snapshot:
         print("[secretary] herdr が見つからないので snapshot の保険は無効です", flush=True)
+    if not args.once and cfg.get("update_check", True):
+        for p in hook_script_problems() + skill_update_problems():
+            print(f"[secretary] {p}", flush=True)
 
     while True:
         lines: list[str] = []
@@ -1004,7 +1343,7 @@ def cmd_watch(args) -> int:
                         meta = read_meta(ev["task_id"])
                     except Exception:
                         continue
-                    line = apply_event(meta, ev)
+                    line = apply_event(meta, ev, cfg)
                     write_meta(meta)
                     if line:
                         lines.append(line)
@@ -1019,7 +1358,7 @@ def cmd_watch(args) -> int:
                 except Exception as e:
                     lines.append(f"[secretary] snapshot に失敗: {e}")
             for meta in all_metas():
-                line = periodic_checks(meta, cfg, live)
+                line = periodic_checks(meta, cfg, live, check_silence=live is not None or not use_snapshot)
                 if line:
                     write_meta(meta)
                     lines.append(line)
@@ -1079,6 +1418,22 @@ def main(argv=None) -> int:
     s.add_argument("id")
     s.add_argument("text")
     s.set_defaults(func=cmd_reply)
+
+    s = sub.add_parser("choose")
+    s.add_argument("id")
+    s.add_argument("number", type=int, help="選択肢の番号（1 から）")
+    s.set_defaults(func=cmd_choose)
+
+    s = sub.add_parser("cleanup")
+    s.add_argument("id")
+    s.add_argument("--yes", action="store_true", help="人間が OK したら付ける。付けなければ何を消すかを出すだけ")
+    s.add_argument("--keep-tab", action="store_true")
+    s.add_argument("--keep-worktree", action="store_true")
+    s.set_defaults(func=cmd_cleanup)
+
+    s = sub.add_parser("doctor")
+    s.add_argument("--no-fetch", action="store_true", help="upstream を fetch せずに比べる")
+    s.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("permissions")
     s.add_argument("--top", type=int, default=20)

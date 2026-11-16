@@ -1,5 +1,12 @@
 # セットアップ
 
+## 0. 必要なもの
+
+- **herdr 0.9.5 以上**。0.7.3 では `agent start` に `--kind` / `--pane` がなく、`unknown option: --kind` で起動に失敗する
+- herdr を上げたら、**サーバーも再起動する**。古いサーバーが動いたままだと、クライアントとの protocol が合わずに `protocol_mismatch` で失敗する。サーバーを止めるとすべてのペインのプロセスが止まるので、作業を区切ってから `herdr server stop` し、`herdr` で起動し直す
+
+`sec init` と `sec new` は、先に `herdr --version` と `herdr status --json` を見て、足りなければ何をすればいいかを出す（`sec new` は登録せずに終了コード 3 で終わる）。いつでも `sec doctor` で確かめられる。
+
 ## 1. 初期化
 
 ```bash
@@ -21,7 +28,15 @@ python3 <このリポジトリ>/skills/herdr-secretary/scripts/secretary.py init
 
 `repos.md` は `- 名前: 絶対パス — 説明` の形で書く。名前を書いておくと `sec new --repo 名前` で指定できる。
 
-`worker-settings.json` は作業エージェントの起動時に `--settings` で渡す。普段使っている Claude Code の設定には触らない。
+`worker-settings.json` は作業エージェントの起動時に `--settings` で渡す。普段使っている Claude Code の設定には触らない。`init` はやり直してもよい（hook の向き先が変わったときなど）。`sec allow` で足した許可リストは残る。
+
+`.claude/` 配下の Edit / Write は Claude Code の保護パスで、`allow` や `acceptEdits` があっても毎回確認される。許可リストでは避けられない。
+
+### スキルの更新を反映する
+
+hook は `init` を実行したリポジトリ（このリポジトリ）の `scripts/secretary.py` を直接読む。PR をマージしただけでは手元のファイルは変わらないので、**マージしたら手元で `git pull` する**。pull すれば、動いている作業エージェントの hook にもすぐ効く。`sec watch` は起動したときのコードで動き続けるので、pull したら起動し直す（秘書のセッションで Monitor を張り直す）。
+
+`sec watch` は起動時に upstream を fetch し、手元が遅れていれば `[secretary] スキルのリポジトリ（...）が upstream より N コミット遅れています` と知らせる。hook が別の場所のスクリプトを呼んでいるときも知らせる。`sec doctor` でも同じことを確かめられる。止めたいときは config.json の `update_check` を `false` にする。
 
 ## 2. 秘書用ディレクトリで Claude Code を起動する
 
@@ -40,6 +55,13 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 | 最初の指示・`sec reply` | `herdr agent prompt <agent> "[secretary] ..."` |
 | ペインとエージェントの生存確認 | `herdr pane list` / `herdr agent list` |
 | 画面を読む（`sec peek`） | `herdr agent read <agent> --source recent-unwrapped --lines N`（JSON ではなく生のテキストが返る） |
+| 選択肢を選ぶ（`sec choose`） | `herdr agent send-keys <agent> down ... enter`（カーソルは先頭の選択肢にあるので、番号 - 1 回 down） |
+| タブを閉じる（`sec cleanup`） | `herdr tab close <tab>` |
+| 版とサーバーの確認（`sec doctor`） | `herdr --version` / `herdr status --json`（`server.compatible`、`restart_needed`） |
+
+hook が届かないと（スクリプトが古い、hook の向き先が違う、など）、許可待ちや作業の終了に気づけず、running のまま「30 分イベントなし」「コマンドが 120 分終わらない」に見える。そこで、無反応と判定する前に `herdr agent list` の `agent_status` を見る。`working` なら判定しない。`blocked` なら「許可待ちか選択待ち」、`idle` / `done` なら「入力待ち」（result.md があれば review）として、`hook が届いていない可能性` を添えて知らせる。この判定は snapshot（`snapshot_interval_sec` ごと）の周にだけ行う。
+
+`sec choose` は、直前のツールが AskUserQuestion で、herdr から見て `blocked` のときだけ動く。許可ダイアログも番号付きの選択肢なので、取り違えて秘書が許可しないようにしている。
 
 hook はどのタスクのイベントかを `SECRETARY_TASK_ID` で知る。ただし `--env` で渡した変数は、そのタブのシェルにしか残らない。herdr のサーバーを再起動すると、ペインのシェルが作り直されて変数が消える。そのペインで `sec retry` すると、起動し直した Claude Code には `SECRETARY_TASK_ID` がない。そこで hook は、`SECRETARY_TASK_ID` がなければ herdr が付ける `HERDR_PANE_ID` を見て、そのペインを使っている閉じていないタスクを探す。`SECRETARY_HOME` は hook のコマンドに直接書いてある。
 
@@ -52,7 +74,8 @@ herdr のエラーは次のように扱う。
 - `workspace_not_found`：アクティブなワークスペースがない（秘書が herdr の外にいる）。`secretary` ワークスペースを作ってそこにタブを置く
 
 herdr は Claude Code の起動直後の画面（初回の案内など）を「入力待ち」と判定することがある。その場合、最初の指示はその画面に吸い込まれる。そのため、最初の指示が hook（UserPromptSubmit）で届いたことを 30 秒以内に確認できなければ、blocked として知らせる。Enter を自動で送り直すことはしない（フォルダの信頼確認は、既定の選択肢が「No, exit」）。
-- `agent_blocked`：許可や選択肢のダイアログが出ている。`sec reply` は送らず、ペインで答えるよう案内する
+- `agent_blocked`：許可や選択肢のダイアログが出ている。`sec reply` は送らない。選択式の質問なら `sec choose`、許可ダイアログならペインで答えるよう案内する
+- `protocol_mismatch`：herdr を上げたあと、サーバーが古いまま。サーバーの再起動が要る（0. を参照）
 
 UserPromptSubmit が来たら、prompt の先頭で送り手を見分ける。`[secretary]` は秘書、`<task-notification>` は Claude Code 自身（バックグラウンドのサブエージェントやコマンドの完了通知）、それ以外は人間の直接指示として manual にする。許可ダイアログや選択式の質問（AskUserQuestion）にペインで答えても UserPromptSubmit は来ない（PostToolUse で running に戻る）。
 
@@ -115,5 +138,7 @@ herdr をソースからビルドし、ヘッドレスのサーバーを立て�
 | `long_tool_alert_min` | 120 | 1 つのコマンド（テストの全件実行など）がこの分数終わらなければ異常として通知する |
 | `manual_timeout_min` | 15 | 人間の入力がこの分数途切れたら自動で秘書に戻す。0 で無効 |
 | `review_backlog_alert` | 5 | レビュー待ちがこの件数に達したら知らせる。0 で無効 |
+| `permission_repeat_quiet_min` | 10 | 同じタスクで同じ種類の許可待ち（同じルール候補、または保護パス）が続いたら、最初の通知からこの分数は通知を重ねない。0 で無効 |
+| `update_check` | `true` | `sec watch` の起動時に、スキルのリポジトリが upstream より遅れていないか、hook の向き先が合っているかを確かめる |
 | `notify` | `auto` | デスクトップ通知。`auto` は macOS なら osascript。`off` で無効。`{text}` を含むコマンドも書ける |
 | `herdr_bin` | `herdr` | herdr のコマンド名 |

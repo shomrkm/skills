@@ -4,6 +4,9 @@
 状態は $FAKE_HERDR_STATE（JSON）に置き、呼び出しは $FAKE_HERDR_STATE.log に記録する。
 $FAKE_HERDR_STATE.blocked にエージェント名を書くと、その agent prompt は agent_blocked で失敗する。
 $FAKE_HERDR_STATE.not_ready にエージェント名を書くと、その agent start は agent_not_ready で失敗する。
+$FAKE_HERDR_STATE.version に版を書くと、--version がその版を返す（既定は 0.9.5）。
+$FAKE_HERDR_STATE.mismatch があると、status --json がサーバーとの protocol の不一致を返す。
+agent list の agent_status は状態ファイルの "status"（名前 → 状態）で変えられる（既定は working）。
 """
 import json
 import os
@@ -43,14 +46,46 @@ def listed(name):
 
 group, cmd = args[0], args[1] if len(args) > 1 else ""
 
+version_path = Path(f"{state_path}.version")
+version = version_path.read_text().strip() if version_path.exists() else "0.9.5"
+
+if group == "--version":
+    print(f"herdr {version}")
+    sys.exit(0)
+
+if (group, cmd) == ("status", "--json"):
+    mismatch = Path(f"{state_path}.mismatch").exists()
+    print(json.dumps({
+        "client": {"version": version, "protocol": 22},
+        "server": {"status": "running", "running": True, "version": "0.7.3" if mismatch else version,
+                   "protocol": 14 if mismatch else 22, "compatible": not mismatch,
+                   "endpoint_compatible": not mismatch, "restart_needed": mismatch, "server_binary_stale": False},
+    }))
+    sys.exit(0)
+
 if (group, cmd) == ("pane", "list"):
     ok("pane_list", panes=[{"pane_id": p, "terminal_id": "t", "workspace_id": "w1",
                             "tab_id": p.split(":")[0], "focused": False, "agent_status": "idle"}
                            for p in state["panes"]])
 
 if (group, cmd) == ("agent", "list"):
-    ok("agent_list", agents=[{"name": n, "pane_id": p, "agent": "claude", "agent_status": "idle"}
+    ok("agent_list", agents=[{"name": n, "pane_id": p, "agent": "claude",
+                              "agent_status": state.get("status", {}).get(n, "working")}
                              for n, p in state["agents"].items()])
+
+if (group, cmd) == ("agent", "send-keys"):
+    name = args[2]
+    if name not in state["agents"]:
+        err("agent_not_found", name)
+    ok("agent_keys_sent", agent={"name": name, "pane_id": state["agents"][name]})
+
+if (group, cmd) == ("tab", "close"):
+    tab = args[2]
+    gone = [p for p in state["panes"] if f"w1:t{p.split(':p')[1]}" == tab]
+    state["panes"] = [p for p in state["panes"] if p not in gone]
+    state["agents"] = {n: p for n, p in state["agents"].items() if p not in gone}
+    save()
+    ok("tab_closed", tab_id=tab)
 
 if (group, cmd) == ("tab", "create"):
     assert "--no-focus" in args, "フォーカスを奪ってはいけない"
