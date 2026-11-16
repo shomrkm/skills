@@ -3,7 +3,9 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 SEC="python3 $HERE/../scripts/secretary.py"
-TMP=$(mktemp -d)
+TMP=$(cd "$(mktemp -d)" && pwd -P)
+# herdr のペインの中（作業エージェント自身など）で走らせても、そのペインやタスクを触らない
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID SECRETARY_TASK_ID
 export SECRETARY_HOME="$TMP/home" HERDR_BIN="$HERE/fake_herdr.py" FAKE_HERDR_STATE="$TMP/herdr.json"
 REPO="$TMP/repo"; mkdir -p "$REPO"
 fail() { echo "FAIL: $*"; $SEC list --all; cat "$FAKE_HERDR_STATE.log"; exit 1; }
@@ -159,6 +161,24 @@ $SEC retry t004 >/dev/null
 [ "$(grep -cE '"agent", "start", "t004-' "$LOG")" -ge 2 ] || fail "retry で起動し直していない"
 hook t004 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
 
+# herdr サーバーを再起動するとペインのシェルが作り直され、タブに渡した SECRETARY_TASK_ID が消える。
+# そのペインで retry しても、hook は HERDR_PANE_ID からタスクを引いて最初の指示の受領を記録する
+grep -q "SECRETARY_HOME=$SECRETARY_HOME python3 .*secretary.py hook" "$SECRETARY_HOME/worker-settings.json" || fail "hook コマンドに SECRETARY_HOME がない"
+P4=$(python3 -c "import json; print(json.load(open('$SECRETARY_HOME/tasks/t004/meta.json'))['pane'])")
+pane_hook() { # pane_hook EVENT [extra json]
+  echo "{\"hook_event_name\":\"$1\"${2:-}}" | env -u SECRETARY_TASK_ID HERDR_PANE_ID="$P4" $SEC hook
+}
+watch >/dev/null
+$SEC retry t004 >/dev/null
+pane_hook UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
+out=$(watch); [ -z "$out" ] || fail "環境変数が消えたペインで最初の指示が届いたのに通知: $out"
+# イベントが届かず blocked になっていても、作業が進めば running に戻る
+$SEC retry t004 >/dev/null
+out=$(watch); expect "t004 running→blocked 起動画面で止まっている" "$out"
+pane_hook PostToolUse ',"tool_name":"mcp__figma__get_design_context"'
+watch >/dev/null
+expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t004/meta.json)"
+
 # 許可ルールの候補と sec allow
 hook t004 PermissionRequest ',"tool_name":"Bash","tool_input":{"command":"cd /x/y && git worktree add ../wt -b task/t004"}'
 out=$(watch); expect 't004 running→blocked 許可待ち: Bash `git worktree add ../wt -b task/t004`' "$out"
@@ -170,10 +190,15 @@ expect "Bash(git worktree:\*).*許可済みなのに止まった" "$($SEC permis
 # peek は agent read で直近の画面を読む
 expect "(screen of t004-" "$($SEC peek t004)"
 
-# SECRETARY_TASK_ID がなければ hook は何もしない
+# SECRETARY_TASK_ID がなく、タスクのペインでもなければ hook は何もしない
 before=$(wc -l < $SECRETARY_HOME/events.jsonl)
-echo '{"hook_event_name":"Stop"}' | env -u SECRETARY_TASK_ID $SEC hook
+echo '{"hook_event_name":"Stop"}' | env -u SECRETARY_TASK_ID -u HERDR_PANE_ID $SEC hook
+echo '{"hook_event_name":"Stop"}' | env -u SECRETARY_TASK_ID HERDR_PANE_ID=w9:p9 $SEC hook
 [ "$(wc -l < $SECRETARY_HOME/events.jsonl)" -eq "$before" ] || fail "タスク外の hook が記録された"
+# 閉じたタスクのペインは引かない
+P1=$(python3 -c "import json; print(json.load(open('$SECRETARY_HOME/tasks/t001/meta.json'))['pane'])")
+echo '{"hook_event_name":"Stop"}' | env -u SECRETARY_TASK_ID HERDR_PANE_ID="$P1" $SEC hook
+[ "$(wc -l < $SECRETARY_HOME/events.jsonl)" -eq "$before" ] || fail "閉じたタスクのペインの hook が記録された"
 
 $SEC list
 echo "OK"

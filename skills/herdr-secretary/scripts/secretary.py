@@ -556,7 +556,8 @@ def cmd_init(args) -> int:
     if not repos.exists():
         repos.write_text(REPOS_TEMPLATE)
 
-    hook_cmd = f"python3 {shlex.quote(str(SCRIPT_PATH))} hook"
+    # SECRETARY_HOME もペインの環境変数だけに頼らない（herdr の再起動で消える）
+    hook_cmd = f"SECRETARY_HOME={shlex.quote(str(h))} python3 {shlex.quote(str(SCRIPT_PATH))} hook"
     hook = [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}]
     settings = {
         "permissions": {
@@ -882,9 +883,25 @@ def cmd_close(args) -> int:
     return 0
 
 
+def hook_task_id() -> str | None:
+    """hook を呼んだ作業エージェントのタスク ID。
+
+    herdr のサーバーを再起動するとペインのシェルが作り直され、タブを作ったときに --env で渡した
+    SECRETARY_TASK_ID が消える。そのペインで retry すると hook が何も記録できず、最初の指示が
+    届いていないと誤判定してしまうので、herdr が付ける HERDR_PANE_ID からも引けるようにする。"""
+    task_id = os.environ.get("SECRETARY_TASK_ID")
+    if task_id:
+        return task_id
+    pane = os.environ.get("HERDR_PANE_ID")
+    if not pane:
+        return None
+    owners = [m for m in all_metas() if m.get("pane") == pane and m["status"] != CLOSED]
+    return max(owners, key=lambda m: parse_iso(m.get("started_at")))["id"] if owners else None
+
+
 def cmd_hook(args) -> int:
     """作業エージェントの hook。何も出力しない（UserPromptSubmit の出力は文脈に混ざるため）。"""
-    task_id = os.environ.get("SECRETARY_TASK_ID")
+    task_id = hook_task_id()
     if not task_id:
         return 0
     try:
