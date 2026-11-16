@@ -41,6 +41,8 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 | ペインとエージェントの生存確認 | `herdr pane list` / `herdr agent list` |
 | 画面を読む（`sec peek`） | `herdr agent read <agent> --source recent-unwrapped --lines N`（JSON ではなく生のテキストが返る） |
 
+hook はどのタスクのイベントかを `SECRETARY_TASK_ID` で知る。ただし `--env` で渡した変数は、そのタブのシェルにしか残らない。herdr のサーバーを再起動すると、ペインのシェルが作り直されて変数が消える。そのペインで `sec retry` すると、起動し直した Claude Code には `SECRETARY_TASK_ID` がない。そこで hook は、`SECRETARY_TASK_ID` がなければ herdr が付ける `HERDR_PANE_ID` を見て、そのペインを使っている閉じていないタスクを探す。`SECRETARY_HOME` は hook のコマンドに直接書いてある。
+
 `<agent>` は `t001-1a2b3c` のように、タスク ID に秘書ディレクトリごとの識別子を付けた名前にしている。閉じたタスクのエージェントがまだ生きていても、名前がぶつからない。
 
 herdr のエラーは次のように扱う。
