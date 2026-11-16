@@ -39,6 +39,8 @@ from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
 SECRETARY_MARK = "[secretary]"
+# Claude Code がユーザーターンとして差し込むもの（バックグラウンドのサブエージェントやコマンドの完了通知）。人間の入力ではない
+SYSTEM_PROMPT_PREFIXES = ("<task-notification>",)
 
 # 状態
 QUEUED = "queued"      # 並列上限のため起動待ち
@@ -192,6 +194,8 @@ def apply_event(meta: dict, ev: dict) -> str | None:
             meta.pop("awaiting_ack_since", None)
             meta.pop("pending_first_prompt", None)
             return None
+        if ev.get("from_system"):
+            return transition(meta, RUNNING, "バックグラウンド処理の完了で再開") if status == BLOCKED else None
         meta["last_human_at"] = meta["last_event_at"]
         if status == REVIEW:
             # レビュー中に人間が追加で頼んだ → 介入扱い。result.md が書き直されたらまた review
@@ -910,7 +914,9 @@ def cmd_hook(args) -> int:
         data = {}
     ev = {"time": now_iso(), "task_id": task_id, "event": data.get("hook_event_name", "")}
     if ev["event"] == "UserPromptSubmit":
-        ev["from_secretary"] = (data.get("prompt") or "").lstrip().startswith(SECRETARY_MARK)
+        prompt = (data.get("prompt") or "").lstrip()
+        ev["from_secretary"] = prompt.startswith(SECRETARY_MARK)
+        ev["from_system"] = prompt.startswith(SYSTEM_PROMPT_PREFIXES)
     elif ev["event"] == "Notification":
         ev["message"] = data.get("message", "")
     elif ev["event"] in ("PreToolUse", "PermissionRequest"):
