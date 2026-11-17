@@ -40,14 +40,23 @@ expect "herdr server stop" "$out"
 rm "$FAKE_HERDR_STATE.mismatch"
 [ ! -d "$SECRETARY_HOME/tasks/t001" ] || fail "herdr の準備ができていないのにタスクを作った"
 
+# タブの英語名に英数字がなければ登録しない
+if out=$($SEC new --repo myrepo --title x --name "注文の修正" --done d --request r 2>&1); then fail "英語でない名前で登録できた"; fi
+expect "--name は英語で" "$out"
+[ ! -d "$SECRETARY_HOME/tasks/t001" ] || fail "英語でない名前でタスクを作った"
+
 # repos.md の名前で指定できる
-out=$($SEC new --repo myrepo --title "N+1 修正" --done "spec が通る" --request "N+1 を直す")
+out=$($SEC new --repo myrepo --title "N+1 修正" --name "Fix Order_Query" --done "spec が通る" --request "N+1 を直す")
 expect "t001 queued→running" "$out"
 $SEC new --repo "$REPO" --title "two" --done d --request r >/dev/null
-out=$($SEC new --repo "$REPO" --title "three" --done d --request r)
+out=$($SEC new --repo "$REPO" --title "三つ目" --done d --request r)
 expect "キュー待ち" "$out"
 LOG="$FAKE_HERDR_STATE.log"
 grep -q "\"tab\", \"create\", \"--cwd\", \"$REPO\"" "$LOG" || fail "リポジトリでタブを作っていない"
+# タブには ID と、内容がわかる英語名（kebab-case）を出す。--name がなければ英語の題から作り、英語でない題なら ID だけ
+grep -q '"--label", "t001 fix-order-query"' "$LOG" || fail "タブ名に英語名が付いていない"
+grep -q '"--label", "t002 two"' "$LOG" || fail "英語の題からタブ名を作っていない"
+expect '"name": ""' "$(cat $SECRETARY_HOME/tasks/t003/meta.json)"
 grep -q '"--env", "SECRETARY_TASK_ID=t001"' "$LOG" || fail "タスク ID を環境変数で渡していない"
 grep -qE '"agent", "start", "t001-[0-9a-f]{6}", "--kind", "claude", "--pane", "w1:p1"' "$LOG" || fail "agent start が呼ばれていない"
 grep -q '"--", "--settings", ".*worker-settings.json"' "$LOG" || fail "worker-settings を渡していない"
@@ -140,6 +149,7 @@ out=$(watch); expect "manual→review" "$out"
 expect "t001 \[review" "$($SEC inbox)"
 # review は並列数に数えないので、空いた枠で t003 が起動する
 expect "t003 queued→running" "$out"
+grep -q '"--label", "t003", ' "$LOG" || fail "英語でない題のタブ名が ID だけになっていない"
 
 # review 後の追加指示 → manual。古い result.md では review に戻らない
 hook t001 UserPromptSubmit ',"prompt":"テストも足して"'
@@ -196,8 +206,9 @@ out=$(watch); expect "t002 running→blocked 異常: ペインが見つからな
 # 起動時の確認（フォルダの信頼など）で止まったら知らせ、答えた後に最初の指示を送り直す
 echo t004 > "$FAKE_HERDR_STATE.not_ready"
 $SEC close t003 >/dev/null
-out=$($SEC new --repo myrepo --title four --done d --request r)
+out=$($SEC new --repo myrepo --title four --name "Show descriptive English names on herdr tabs" --done d --request r)
 expect "t004 queued→blocked 起動時の確認待ち" "$out"
+grep -q '"--label", "t004 show-descriptive-english"' "$LOG" || fail "長い英語名を単語の切れ目で縮めていない"
 grep -q '"agent", "prompt", "t004' "$LOG" && fail "確認待ちなのに指示を送った"
 # 確認画面に Enter を送らないよう、自動では送り直さない
 out=$(watch); grep -q '"agent", "prompt", "t004' "$LOG" && fail "勝手に送り直した"

@@ -467,6 +467,27 @@ def agent_name(meta: dict) -> str:
     return meta.get("agent") or f"{meta['id']}-{home_tag()}"
 
 
+TAB_NAME_MAX = 24
+
+
+def tab_name(text: str) -> str:
+    """タブに出す英語名。小文字の kebab-case にし、単語の切れ目で TAB_NAME_MAX 文字以内に収める。
+    英数字がなければ空文字を返す。"""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    name = ""
+    for w in words:
+        joined = f"{name}-{w}" if name else w
+        if len(joined) > TAB_NAME_MAX:
+            break
+        name = joined
+    return name or (words[0][:TAB_NAME_MAX] if words else "")
+
+
+def tab_label(meta: dict) -> str:
+    """herdr のタブのラベル。秘書も人間もタスクを ID で呼ぶので、ID の後ろに内容がわかる英語名を付ける。"""
+    return f"{meta['id']} {meta['name']}" if meta.get("name") else meta["id"]
+
+
 def home_tag() -> str:
     import hashlib
     return hashlib.sha1(str(home()).encode()).hexdigest()[:6]
@@ -564,7 +585,7 @@ class Herdr:
 
     def start_worker(self, meta: dict, settings: Path) -> str:
         """タブを作り（フォーカスは移さない）、そのペインで Claude Code を起動する。ペイン ID を返す。"""
-        args = ["tab", "create", "--cwd", meta["repo"], "--label", meta["id"], "--no-focus",
+        args = ["tab", "create", "--cwd", meta["repo"], "--label", tab_label(meta), "--no-focus",
                 "--env", f"SECRETARY_TASK_ID={meta['id']}", "--env", f"SECRETARY_HOME={home()}"]
         # 秘書と同じワークスペースにタブを並べる（herdr のペインの中なら HERDR_WORKSPACE_ID がある）
         workspace = os.environ.get("HERDR_WORKSPACE_ID")
@@ -835,6 +856,10 @@ def cmd_new(args) -> int:
     if not request:
         print("依頼内容が空です。", file=sys.stderr)
         return 2
+    name = tab_name(args.name if args.name is not None else (args.title if args.title.isascii() else ""))
+    if args.name is not None and not name:
+        print(f"--name は英語で付けてください（例: fix-order-query）: {args.name}", file=sys.stderr)
+        return 2
     repo = resolve_repo(args.repo)
     if repo is None:
         names = ", ".join(load_repos()) or "（repos.md が空）"
@@ -856,7 +881,7 @@ def cmd_new(args) -> int:
         (d / "prompt.md").write_text(PROMPT_TEMPLATE.format(
             id=tid, title=args.title, request=request, done=done,
             status=d / "status.md", result=d / "result.md", worktree=home() / "worktrees" / tid))
-        meta = {"id": tid, "title": args.title, "repo": str(repo), "status": QUEUED,
+        meta = {"id": tid, "title": args.title, "name": name, "repo": str(repo), "status": QUEUED,
                 "reason": "", "created_at": now_iso(), "status_since": now_iso(), "pane": None,
                 "history": []}
         write_meta(meta)
@@ -1392,6 +1417,7 @@ def main(argv=None) -> int:
     s = sub.add_parser("new")
     s.add_argument("--repo", required=True)
     s.add_argument("--title", required=True)
+    s.add_argument("--name", help="タブに出す短い英語名（例: fix-order-query）。省略すると英語の題から作る")
     s.add_argument("--done", help="完了条件（人間から受け取ったものをそのまま）")
     s.add_argument("--request", help="依頼内容。省略すると標準入力から読む")
     s.add_argument("--no-launch", action="store_true")
