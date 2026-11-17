@@ -60,7 +60,18 @@ expect '"name": ""' "$(cat $SECRETARY_HOME/tasks/t003/meta.json)"
 grep -q '"--env", "SECRETARY_TASK_ID=t001"' "$LOG" || fail "タスク ID を環境変数で渡していない"
 grep -qE '"agent", "start", "t001-[0-9a-f]{6}", "--kind", "claude", "--pane", "w1:p1"' "$LOG" || fail "agent start が呼ばれていない"
 grep -q '"--", "--settings", ".*worker-settings.json"' "$LOG" || fail "worker-settings を渡していない"
-grep -q "\"--add-dir\", \"$TMP/wt\"" "$LOG" || fail "リポジトリの worktree 置き場を --add-dir で渡していない"
+# repos.md の worktree 置き場は --add-dir で渡すと起動のたびに信頼確認で止まるので、worker-settings に足す
+grep -q '"--add-dir"' "$LOG" && fail "--add-dir で渡している（起動のたびに信頼確認が出る）"
+trusted() { # trusted DIR: worker-settings の additionalDirectories と許可リストに DIR が入っているか
+  python3 - "$1" <<PY
+import json,sys
+d=sys.argv[1]; p=json.load(open("$SECRETARY_HOME/worker-settings.json"))["permissions"]
+sys.exit(0 if d in p["additionalDirectories"] and f"Edit(/{d}/**)" in p["allow"] and f"Read(/{d}/**)" in p["allow"] else 1)
+PY
+}
+trusted "$TMP/wt" || fail "リポジトリの worktree 置き場を worker-settings に足していない"
+[ -d "$TMP/wt" ] || fail "worktree 置き場を作っていない"
+[ "$(grep -c "\"$TMP/wt\"" "$SECRETARY_HOME/worker-settings.json")" -eq 1 ] || fail "起動のたびに同じディレクトリを重ねて足した"
 grep -qE '"agent", "prompt", "t001-[0-9a-f]{6}", "\[secretary\] .*prompt.md' "$LOG" || fail "最初の指示を送っていない"
 
 # 秘書からの最初のプロンプトは介入扱いにしない
@@ -337,7 +348,13 @@ for es in s["hooks"].values():
 json.dump(s,open(p,"w"))
 PY
 expect "別の場所のスクリプトを呼んでいます" "$($SEC doctor --no-fetch)"
+# init のやり直しでは、足したディレクトリを残し、repos.md の worktree 置き場もまとめて足す
+REPO2="$TMP/repo2"; mkdir -p "$REPO2"
+echo "- other: $REPO2 — テスト用（worktrees: $TMP/wt2）" >> "$SECRETARY_HOME/repos.md"
 $SEC init >/dev/null
+trusted "$TMP/wt" || fail "init のやり直しで worktree 置き場が消えた"
+trusted "$TMP/wt2" || fail "init で repos.md の worktree 置き場を足していない"
+trusted "$SECRETARY_HOME/tasks" || fail "init でタスクフォルダを足していない"
 $SEC doctor --no-fetch | grep -q "別の場所" && fail "init をやり直しても hook の向き先が直らない"
 grep -q 'Bash(git worktree:\*)' "$SECRETARY_HOME/worker-settings.json" || fail "init のやり直しで許可リストが消えた"
 

@@ -452,13 +452,29 @@ def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], dict[str, str]]
 # - herdr のペインの中（HERDR_ENV=1）から呼ぶと、そのセッションを操作する
 # ---------------------------------------------------------------------------
 
-def worker_extra_args(meta: dict) -> list[str]:
-    extra = []
+def trust_dirs(settings: dict, dirs: list[Path]) -> None:
+    """作業エージェントが確認なしで触れるディレクトリを、worker-settings の additionalDirectories と許可リストに足す。
+    `claude --add-dir` で渡すと起動のたびに信頼確認が出て止まるので、設定ファイルに書く。"""
+    perms = settings["permissions"]
+    extra = perms.setdefault("additionalDirectories", [])
+    allow = perms.setdefault("allow", [])
+    for d in dirs:
+        if str(d) not in extra:
+            extra.append(str(d))
+        allow += [r for r in (f"Edit(/{d}/**)", f"Read(/{d}/**)") if r not in allow]
+
+
+def trust_repo_worktrees(meta: dict, settings_path: Path) -> None:
+    """repos.md は init の後にも書き足されるので、起動のたびにそのリポジトリの worktree 置き場を設定に足す。"""
     wt = repo_worktrees_dir(Path(meta["repo"]))
-    if wt:
-        wt.mkdir(parents=True, exist_ok=True)
-        extra += ["--add-dir", str(wt)]
-    return extra
+    if not wt:
+        return
+    wt.mkdir(parents=True, exist_ok=True)
+    settings = json.loads(settings_path.read_text())
+    before = json.dumps(settings)
+    trust_dirs(settings, [wt])
+    if json.dumps(settings) != before:
+        settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
 
 
 def agent_name(meta: dict) -> str:
@@ -604,13 +620,13 @@ class Herdr:
 
     def start_agent(self, meta: dict, settings: Path) -> str:
         pane = meta["pane"]
+        trust_repo_worktrees(meta, settings)
         # agent start は Claude Code が入力を受け付けられる状態になってから返る。
         # 作ったばかりのタブはシェルのプロンプトが出る前だと agent_pane_busy になるので少し待つ
         for attempt in range(20):
             try:
                 self._run("agent", "start", agent_name(meta), "--kind", "claude", "--pane", pane,
-                          "--timeout", "60000", "--", "--settings", str(settings),
-                          *worker_extra_args(meta), timeout=90)
+                          "--timeout", "60000", "--", "--settings", str(settings), timeout=90)
                 return pane
             except HerdrError as e:
                 if e.code != "agent_pane_busy" or attempt == 19:
@@ -723,10 +739,6 @@ def cmd_init(args) -> int:
         "permissions": {
             # ファイル編集の確認で止まらないようにする。Bash などは許可リストで育てる（sec permissions）
             "defaultMode": "acceptEdits",
-            # タスクフォルダと、リポジトリにルールがないときの作業場所は確認なしで触れるようにする
-            "additionalDirectories": [str(tasks_dir()), str(h / "worktrees")],
-            "allow": [f"Edit(/{tasks_dir()}/**)", f"Read(/{tasks_dir()}/**)",
-                      f"Edit(/{h}/worktrees/**)", f"Read(/{h}/worktrees/**)"],
         },
         "hooks": {
             "UserPromptSubmit": hook,
@@ -738,12 +750,16 @@ def cmd_init(args) -> int:
             "PostToolUseFailure": [{"matcher": "*", "hooks": hook[0]["hooks"]}],
         },
     }
+    # タスクフォルダと、リポジトリにルールがないときの作業場所と、repos.md の worktree 置き場は確認なしで触れるようにする
+    trust_dirs(settings, [tasks_dir(), h / "worktrees", *repo_worktrees_dirs()])
     ws_path = h / "worker-settings.json"
     if ws_path.exists():
-        # init のやり直し（hook の向き先を直すなど）で、sec allow で育てた許可リストを消さない
+        # init のやり直し（hook の向き先を直すなど）で、sec allow で育てた許可リストや足したディレクトリを消さない
         with contextlib.suppress(Exception):
-            old_allow = json.loads(ws_path.read_text())["permissions"].get("allow", [])
-            settings["permissions"]["allow"] += [r for r in old_allow if r not in settings["permissions"]["allow"]]
+            old = json.loads(ws_path.read_text())["permissions"]
+            for key in ("additionalDirectories", "allow"):
+                cur = settings["permissions"][key]
+                cur += [r for r in old.get(key, []) if r not in cur]
     ws_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
 
     bin_dir = h / "bin"
@@ -778,7 +794,7 @@ def cmd_init(args) -> int:
 def repo_worktrees_dir(repo: Path) -> Path | None:
     """repos.md でそのリポジトリに `（worktrees: <パス>）` が書かれていれば、その絶対パス。
     リポジトリのルールで worktree をリポジトリの外に作る場合、作業エージェントがそこを
-    確認なしで触れるように `claude --add-dir` で渡す。"""
+    確認なしで触れるように worker-settings に足す（trust_dirs）。"""
     p = home() / "repos.md"
     if not p.exists():
         return None
@@ -790,6 +806,11 @@ def repo_worktrees_dir(repo: Path) -> Path | None:
                 d = Path(w.group(1)).expanduser()
                 return (d if d.is_absolute() else repo / d).resolve()
     return None
+
+
+def repo_worktrees_dirs() -> list[Path]:
+    dirs = (repo_worktrees_dir(p) for p in load_repos().values())
+    return list(dict.fromkeys(d for d in dirs if d))
 
 
 def load_repos() -> dict[str, Path]:
