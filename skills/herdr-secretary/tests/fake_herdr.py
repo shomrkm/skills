@@ -7,6 +7,7 @@ $FAKE_HERDR_STATE.not_ready にエージェント名を書くと、その agent 
 $FAKE_HERDR_STATE.version に版を書くと、--version がその版を返す（既定は 0.9.5）。
 $FAKE_HERDR_STATE.mismatch があると、status --json がサーバーとの protocol の不一致を返す。
 agent list の agent_status は状態ファイルの "status"（名前 → 状態）で変えられる（既定は working）。
+$FAKE_HERDR_STATE.screen に書いた内容を agent read が画面として返す（なければ "(screen of <名前>)"）。
 """
 import json
 import os
@@ -127,10 +128,17 @@ if (group, cmd) == ("agent", "prompt"):
         err("agent_blocked", "agent is waiting at an approval dialog")
     ok("agent_prompted", agent={"name": name, "pane_id": state["agents"][name], "agent_status": "working"})
 
+if (group, cmd) == ("pane", "send-text"):
+    if args[2] not in state["panes"]:
+        err("pane_not_found", args[2])
+    ok("pane_text_sent", pane_id=args[2])
+
 if (group, cmd) == ("agent", "read"):
     name = args[2]
+    screen = Path(f"{state_path}.screen")
+    text = screen.read_text() if screen.exists() else f"(screen of {name})"
     ok("pane_read", read={"pane_id": state["agents"].get(name, "?"), "workspace_id": "w1", "tab_id": "w1:t1",
-                          "source": flag("--source"), "format": "text", "text": f"(screen of {name})",
+                          "source": flag("--source"), "format": "text", "text": text,
                           "revision": 1, "truncated": False})
 
 print(f"unknown command: {args}", file=sys.stderr)

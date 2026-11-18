@@ -30,11 +30,13 @@ python3 <このリポジトリ>/skills/herdr-secretary/scripts/secretary.py init
 
 `worker-settings.json` は作業エージェントの起動時に `--settings` で渡す。普段使っている Claude Code の設定には触らない。`init` はやり直してもよい（hook の向き先が変わったときなど）。`sec allow` で足した許可リストは残る。
 
-`.claude/` 配下の Edit / Write は Claude Code の保護パスで、`allow` や `acceptEdits` があっても毎回確認される。許可リストでは避けられない。
+`.claude/` 配下の Edit / Write は Claude Code の保護パスで、`allow` や `acceptEdits` があっても確認される。PreToolUse hook の `permissionDecision: "allow"` でも確認は消えない。PermissionRequest hook が `decision.behavior: "allow"` を返したときだけ確認なしで通るので、作業エージェントの hook（`sec hook`）は、タスクの worktree の置き場（`worktrees/`、repos.md の `（worktrees: ...）`、`<repo>/.claude/worktrees/`）の中の `.claude/skills/`・`.claude/commands/`・`.claude/agents/` への Edit / Write だけを許可する。`.claude/settings.json` など、作業エージェントが自分の権限を広げられるものは許可しない。
 
 ### スキルの更新を反映する
 
-hook は `init` を実行したリポジトリ（このリポジトリ）の `scripts/secretary.py` を直接読む。PR をマージしただけでは手元のファイルは変わらないので、**マージしたら手元で `git pull` する**。pull すれば、動いている作業エージェントの hook にもすぐ効く。`sec watch` は起動したときのコードで動き続けるので、pull したら起動し直す（秘書のセッションで Monitor を張り直す）。
+hook は `init` を実行したリポジトリ（このリポジトリ）の `scripts/secretary.py` を直接読む。PR をマージしただけでは手元のファイルは変わらないので、**マージしたら手元で `git pull` する**。pull すれば、動いている作業エージェントの hook にもすぐ効く。監視ループ（`sec follow` が裏で起動する `sec watch`）は起動したときのコードで動き続けるので、pull したら `kill $(cat ~/secretary/.watch.pid)` で止める。動いている `sec follow` が 10 秒ほどで新しいコードで起動し直す。
+
+監視ループは秘書のセッションから切り離して動き、秘書を終えても止まらない。止めたいときも `kill $(cat ~/secretary/.watch.pid)` する（`sec follow` が動いていれば起動し直されるので、先に秘書のセッションを終える）。出力は `~/secretary/watch.log`、エラーは `~/secretary/watch.err` に残る。
 
 `sec watch` は起動時に upstream を fetch し、手元が遅れていれば `[secretary] スキルのリポジトリ（...）が upstream より N コミット遅れています` と知らせる。hook が別の場所のスクリプトを呼んでいるときも知らせる。`sec doctor` でも同じことを確かめられる。止めたいときは config.json の `update_check` を `false` にする。
 
@@ -138,6 +140,8 @@ herdr をソースからビルドし、ヘッドレスのサーバーを立て�
 | `long_tool_alert_min` | 120 | 1 つのコマンド（テストの全件実行など）がこの分数終わらなければ異常として通知する |
 | `manual_timeout_min` | 15 | 人間の入力がこの分数途切れたら自動で秘書に戻す。0 で無効 |
 | `review_backlog_alert` | 5 | レビュー待ちがこの件数に達したら知らせる。0 で無効 |
+| `first_prompt_ack_sec` | 30 | 最初の指示を送ってからこの秒数で届いたことが確かめられなければ、画面を見る。入力欄に残っていれば Enter を 1 回送り直し、入力欄が見えなければ起動画面で止まっていると通知する |
+| `quiet_hours` | `18:00-09:00` | この時間帯は通知（会話とデスクトップ）を出さずに溜め、明けたら 1 行にまとめて出す。日をまたいでよい。`""` で無効 |
 | `permission_repeat_quiet_min` | 10 | 同じタスクで同じ種類の許可待ち（同じルール候補、または保護パス）が続いたら、最初の通知からこの分数は通知を重ねない。0 で無効 |
 | `update_check` | `true` | `sec watch` の起動時に、スキルのリポジトリが upstream より遅れていないか、hook の向き先が合っているかを確かめる |
 | `notify` | `auto` | デスクトップ通知。`auto` は macOS なら osascript。`off` で無効。`{text}` を含むコマンドも書ける |
