@@ -1,10 +1,10 @@
 ---
-name: unslop-ja
-description: 日本語の文章から「AIっぽさ」を取り除く。unslop の日本語版。
+name: unslop
+description: 日本語の文章から「AIっぽさ」を取り除く。cursor/plugins の pstack にある unslop を日本語向けにしたもの。
 disable-model-invocation: true
 ---
 
-# Unslop（日本語版）
+# Unslop
 
 文章を編集して、AI が書いたような言い回しを取り除く。下のパターンを探してから書き直す。意味は変えず、文章が想定している文体と温度感に合わせる。
 
