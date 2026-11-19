@@ -52,13 +52,16 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 
 | やること | コマンド |
 |---|---|
-| タブを作る（秘書と同じワークスペース、フォーカスは移さない） | `herdr tab create --cwd <repo> --label <id> --no-focus --workspace $HERDR_WORKSPACE_ID --env SECRETARY_TASK_ID=<id> --env SECRETARY_HOME=<home>` → `.result.root_pane.pane_id` |
+| space を探す | `herdr workspace list`（同じ space の閉じていないタスクがいるワークスペース、なければ `label` が space 名のもの） |
+| space にタブを足す（フォーカスは移さない） | `herdr tab create --workspace <ws> --cwd <repo> --label <id 名前> --no-focus --env SECRETARY_TASK_ID=<id> --env SECRETARY_HOME=<home>` → `.result.root_pane.pane_id` |
+| space を作る（space がなかったとき） | `herdr workspace create --cwd <repo> --label <space> --no-focus --env ...` → `.result.workspace` / `.result.tab` / `.result.root_pane`。最初のタブをそのタスクのタブにし、`herdr tab rename <tab> <id 名前>` |
+| 伝言を送る（`sec send`） | `herdr agent prompt <宛先の agent> "[secretary] <送り手 ID> からの伝言 ..."` |
 | Claude Code を起動 | `herdr agent start <agent> --kind claude --pane <pane> --timeout 60000 -- --settings <worker-settings.json>` |
 | 最初の指示・`sec reply` | `herdr agent prompt <agent> "[secretary] ..."` |
 | ペインとエージェントの生存確認 | `herdr pane list` / `herdr agent list` |
 | 画面を読む（`sec peek`） | `herdr agent read <agent> --source recent-unwrapped --lines N`（JSON ではなく生のテキストが返る） |
 | 選択肢を選ぶ（`sec choose`） | `herdr agent send-keys <agent> down ... enter`（カーソルは先頭の選択肢にあるので、番号 - 1 回 down） |
-| タブを閉じる（`sec cleanup`） | `herdr tab close <tab>` |
+| タブを閉じる（`sec close` / `sec cleanup`） | `herdr tab close <tab>`。space に残るのがそのタブだけで、同じ space に閉じていないタスクもなければ `herdr workspace close <ws>`（`herdr tab list --workspace <ws>` で確かめる） |
 | 版とサーバーの確認（`sec doctor`） | `herdr --version` / `herdr status --json`（`server.compatible`、`restart_needed`） |
 
 hook が届かないと（スクリプトが古い、hook の向き先が違う、など）、許可待ちや作業の終了に気づけず、running のまま「30 分イベントなし」「コマンドが 120 分終わらない」に見える。そこで、無反応と判定する前に `herdr agent list` の `agent_status` を見る。`working` なら判定しない。`blocked` なら「許可待ちか選択待ち」、`idle` / `done` なら「入力待ち」（result.md があれば review）として、`hook が届いていない可能性` を添えて知らせる。この判定は snapshot（`snapshot_interval_sec` ごと）の周にだけ行う。
@@ -73,7 +76,7 @@ herdr のエラーは次のように扱う。
 
 - `agent_pane_busy`：作ったばかりのタブでシェルの準備がまだできていない。数秒だけ再試行する
 - `agent_not_ready`：起動時の確認（フォルダを信頼するか、など）で止まっている。blocked として知らせる。人間がペインで答えたら `sec retry` で最初の指示を送り直す
-- `workspace_not_found`：アクティブなワークスペースがない（秘書が herdr の外にいる）。`secretary` ワークスペースを作ってそこにタブを置く
+- `workspace_not_found`：space のワークスペースが一覧を取った後に閉じられた。space を作り直してそこにタブを置く
 
 herdr は Claude Code の起動直後の画面（初回の案内など）を「入力待ち」と判定することがある。その場合、最初の指示はその画面に吸い込まれる。そのため、最初の指示が hook（UserPromptSubmit）で届いたことを 30 秒以内に確認できなければ、blocked として知らせる。Enter を自動で送り直すことはしない（フォルダの信頼確認は、既定の選択肢が「No, exit」）。
 - `agent_blocked`：許可や選択肢のダイアログが出ている。`sec reply` は送らない。選択式の質問なら `sec choose`、許可ダイアログならペインで答えるよう案内する
