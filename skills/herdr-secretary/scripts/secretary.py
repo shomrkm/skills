@@ -9,16 +9,19 @@
   inbox                      人間の判断が要るもの（blocked / review）を古い順に
   show ID                    タスクフォルダの中身（prompt / status / result）
   peek ID [--lines N]        作業エージェントの画面を少しだけ読む
-  reply ID TEXT              入力待ち・レビュー中の作業エージェントに秘書から返事を送る
-  choose ID N                選択式の質問（AskUserQuestion）で N 番の選択肢を選ぶ
+  reply ID TEXT [--force]    入力待ち・レビュー中の作業エージェントに秘書から返事を送る
+  choose ID N | --text TEXT  選択式の質問（AskUserQuestion）で N 番の選択肢を選ぶか、自由記述で答える
   permissions                許可待ちになったコマンドの集計と、許可ルールの候補
   allow RULE...              作業エージェントの許可リストにルールを足す（例: "Bash(git worktree:*)"）
   retry ID                   最初の指示を送り直す（起動画面で止まっていたとき）
   handback ID                manual（人間が介入中）を解除して秘書に戻す
-  close ID                   タスクを閉じる（タブや作業場所は消さない）
+  send ID TEXT               作業エージェントから、同じ space のタスクに伝言を送る（作業エージェントが使う）
+  peers                      作業エージェントから、同じ space のタスクの一覧を見る（作業エージェントが使う）
+  close ID [--keep-tab]      タスクを閉じ、タブも閉じる。space の最後のタスクなら space も閉じる（作業場所は消さない）
   cleanup ID [--yes]         閉じたタスクのタブと worktree を片付ける（--yes なしは確認だけ）
   doctor                     herdr の版・サーバー、hook の向き先、スキルの更新漏れを確かめる
-  watch                     監視ループ。状態が変わったときだけ 1 行出力する
+  watch                      監視ループ。状態が変わったときだけ 1 行出力する
+  follow [--once]            監視ループを裏で動かし、その出力をまだ出していない行から出す（Monitor ではこれを使う）
   hook                       作業エージェントの Claude Code hook から呼ばれる
 
 秘書ディレクトリは $SECRETARY_HOME（既定は ~/secretary）。
@@ -44,6 +47,10 @@ SCRIPT_PATH = Path(__file__).resolve()
 SECRETARY_MARK = "[secretary]"
 # Claude Code がユーザーターンとして差し込むもの（バックグラウンドのサブエージェントやコマンドの完了通知）。人間の入力ではない
 SYSTEM_PROMPT_PREFIXES = ("<task-notification>",)
+# 複数行の agent prompt は貼り付けとして入力され、UserPromptSubmit の prompt がこのタグで包まれる
+PASTED_CONTENT_RE = re.compile(r"<pasted_content[^>]*>\s*")
+# bash モード（`! pwd` など）の入力。モデルのターンは始まらないが Stop は来る
+BASH_MODE_PREFIXES = ("<bash-input>", "<bash-stdout>", "<bash-stderr>")
 
 # 状態
 QUEUED = "queued"      # 並列上限のため起動待ち
@@ -61,6 +68,10 @@ MIN_HERDR_VERSION = (0, 9, 5)
 
 # Claude Code が許可リストや acceptEdits があっても毎回確認するパス
 PROTECTED_DIRS = (".claude",)
+# 保護パスのうち、タスクの worktree の中なら PermissionRequest hook で確認なしに許可する .claude/ 直下のディレクトリ。
+# settings.json などは作業エージェントが自分の権限を広げられてしまうので含めない
+AUTO_ALLOW_CLAUDE_DIRS = ("skills", "commands", "agents")
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit")
 
 QUESTION_TOOL = "AskUserQuestion"
 
@@ -71,6 +82,8 @@ DEFAULT_CONFIG = {
     "long_tool_alert_min": 120,
     "manual_timeout_min": 15,
     "first_prompt_ack_sec": 30,
+    # この時間帯は通知を出さず、明けたら溜まった変化を 1 行にまとめて出す。"" で無効
+    "quiet_hours": "18:00-09:00",
     "review_backlog_alert": 5,
     "permission_repeat_quiet_min": 10,
     "update_check": True,
@@ -246,6 +259,9 @@ def apply_event(meta: dict, ev: dict, cfg: dict | None = None) -> str | None:
         return transition(meta, MANUAL, "人間がペインで直接指示")
 
     if name == "Stop":
+        if ev.get("bash_mode"):
+            # 人間がペインで `! pwd` などを実行しただけ。作業エージェントは何も聞いていない
+            return None
         if take_new_result(meta):
             return transition(meta, REVIEW, "result.md あり")
         if status == MANUAL:
@@ -271,7 +287,7 @@ def apply_event(meta: dict, ev: dict, cfg: dict | None = None) -> str | None:
 
     if name == "PermissionRequest":
         # Claude Code が許可ダイアログを出した（herdr 自身もこの hook で blocked を判定している）
-        if status in (MANUAL, REVIEW):
+        if status in (MANUAL, REVIEW) or ev.get("auto_allowed"):
             return None
         meta["pending_tool"] = pending_tool(ev, meta["last_event_at"])
         return wait_for_human(meta, meta["pending_tool"], cfg)
@@ -377,8 +393,31 @@ def record_permission(task_id: str, tool: dict) -> None:
 HOOK_MISSING = "hook が届いていない可能性。sec doctor で確認"
 
 
+def first_prompt_not_acked(meta: dict, herdr: "Herdr | None") -> str | None:
+    """最初の指示が届いていない。入力欄に残っているだけなら Enter を 1 回送り直す。
+
+    入力欄が見えなければ、起動直後の画面（初回の案内やフォルダの信頼確認）に吸い込まれた可能性が高い。
+    確認画面に Enter を送ると既定の選択肢（No, exit のこともある）を選んでしまうので、人間に画面を進めてもらう。"""
+    meta.pop("awaiting_ack_since")
+    text = None
+    if herdr:
+        with contextlib.suppress(Exception):
+            text = herdr.input_text(agent_name(meta))
+    if text and SECRETARY_MARK in text:
+        if not meta.get("first_prompt_resent"):
+            with contextlib.suppress(Exception):
+                herdr.send_keys(agent_name(meta), "enter")
+                meta["first_prompt_resent"] = True
+                meta["awaiting_ack_since"] = now_iso()
+                return None
+        meta["pending_first_prompt"] = True
+        return transition(meta, BLOCKED, f"最初の指示が入力欄に残ったまま送信されない（ペイン {meta.get('pane')} で Enter を押すか retry）")
+    meta["pending_first_prompt"] = True
+    return transition(meta, BLOCKED, f"起動画面で止まっている（ペイン {meta.get('pane')} を進めてから retry）")
+
+
 def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], dict[str, str]] | None,
-                    check_silence: bool = True) -> str | None:
+                    check_silence: bool = True, herdr: "Herdr | None" = None) -> str | None:
     """イベントでは拾えない異常（ペイン消失・長時間無反応・manual の放置）を見る。
 
     check_silence が False のときは無反応の判定をしない（herdr の状態と突き合わせられる snapshot の周だけ判定する）。"""
@@ -387,12 +426,8 @@ def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], dict[str, str]]
         return None
     now = time.time()
 
-    # 最初の指示が届いていない。起動直後の画面（初回の案内やフォルダの信頼確認）に吸い込まれた可能性が高い。
-    # Enter を自動で送ると確認画面の既定の選択肢を選んでしまうので、人間に画面を進めてもらう
     if status == RUNNING and meta.get("awaiting_ack_since") and now - parse_iso(meta["awaiting_ack_since"]) > cfg.get("first_prompt_ack_sec", 30):
-        meta.pop("awaiting_ack_since")
-        meta["pending_first_prompt"] = True
-        return transition(meta, BLOCKED, f"起動画面で止まっている（ペイン {meta.get('pane')} を進めてから retry）")
+        return first_prompt_not_acked(meta, herdr)
 
     if live is not None and meta.get("pane"):
         panes, agents = live
@@ -464,15 +499,23 @@ def trust_dirs(settings: dict, dirs: list[Path]) -> None:
         allow += [r for r in (f"Edit(/{d}/**)", f"Read(/{d}/**)") if r not in allow]
 
 
-def trust_repo_worktrees(meta: dict, settings_path: Path) -> None:
-    """repos.md は init の後にも書き足されるので、起動のたびにそのリポジトリの worktree 置き場を設定に足す。"""
-    wt = repo_worktrees_dir(Path(meta["repo"]))
-    if not wt:
-        return
-    wt.mkdir(parents=True, exist_ok=True)
+def worker_cli_rules() -> list[str]:
+    """作業エージェントが確認なしで使える sec のサブコマンド（同じ space のタスクとのやり取り）。"""
+    wrapper = home() / "bin" / "sec"
+    return [f"Bash({wrapper} send:*)", f"Bash({wrapper} peers:*)"]
+
+
+def prepare_worker_settings(meta: dict, settings_path: Path) -> None:
+    """repos.md は init の後にも書き足されるので、起動のたびにそのリポジトリの worktree 置き場を設定に足す。
+    sec send / peers の許可も、init をやり直していない秘書ディレクトリに足す。"""
     settings = json.loads(settings_path.read_text())
     before = json.dumps(settings)
-    trust_dirs(settings, [wt])
+    wt = repo_worktrees_dir(Path(meta["repo"]))
+    if wt:
+        wt.mkdir(parents=True, exist_ok=True)
+        trust_dirs(settings, [wt])
+    allow = settings["permissions"].setdefault("allow", [])
+    allow += [r for r in worker_cli_rules() if r not in allow]
     if json.dumps(settings) != before:
         settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
 
@@ -504,9 +547,33 @@ def tab_label(meta: dict) -> str:
     return f"{meta['id']} {meta['name']}" if meta.get("name") else meta["id"]
 
 
+def task_space(meta: dict) -> str:
+    """タスクを置く space（herdr のワークスペース）の名前。関連するタスクは同じ space に並べる。"""
+    return meta.get("space") or tab_label(meta)
+
+
 def home_tag() -> str:
     import hashlib
     return hashlib.sha1(str(home()).encode()).hexdigest()[:6]
+
+
+INPUT_PROMPT_CHARS = ("❯", ">")
+# 空の入力欄に薄く出る入力例。人間が打った文字ではない
+INPUT_PLACEHOLDER_RE = re.compile(r'^Try "[^"]*"$')
+
+
+def input_box(screen: str) -> str | None:
+    """画面から Claude Code の入力欄の中身を取り出す。入力欄は `─` の罫線 2 本に挟まれた `❯` で始まる行で、
+    会話の履歴に出る `❯` の行（送信済みの指示）とは罫線で見分ける。入力欄がなければ None。"""
+    lines = screen.splitlines()
+    borders = [i for i, l in enumerate(lines) if len(l.strip()) >= 10 and set(l.strip()) <= {"─", "━"}]
+    for top, bottom in reversed(list(zip(borders, borders[1:]))):
+        body = lines[top + 1:bottom]
+        if body and body[0].lstrip().startswith(INPUT_PROMPT_CHARS):
+            first = body[0].lstrip()[1:]
+            text = " ".join(l.strip() for l in [first, *body[1:]] if l.strip())
+            return "" if INPUT_PLACEHOLDER_RE.match(text) else text
+    return None
 
 
 class HerdrError(RuntimeError):
@@ -596,31 +663,63 @@ class Herdr:
     def send_keys(self, agent: str, *keys: str) -> None:
         self._run("agent", "send-keys", agent, *keys)
 
+    def send_text(self, pane: str, text: str) -> None:
+        """Enter を押さずに文字だけを打つ。"""
+        self._run("pane", "send-text", pane, text)
+
+    def input_text(self, agent: str) -> str | None:
+        """Claude Code の入力欄に入っている文字。入力欄が見えない（起動画面やダイアログ）なら None。"""
+        r = self._run("agent", "read", agent, "--source", "visible", "--lines", "60")
+        return input_box(r.get("read", {}).get("text") or r.get("text") or "")
+
     def close_tab(self, tab: str) -> None:
         self._run("tab", "close", tab)
 
+    def workspaces(self) -> list[dict]:
+        return self._run("workspace", "list").get("workspaces", [])
+
+    def tab_ids(self, workspace: str) -> set[str]:
+        return {t["tab_id"] for t in self._run("tab", "list", "--workspace", workspace).get("tabs", [])}
+
+    def close_workspace(self, workspace: str) -> None:
+        self._run("workspace", "close", workspace)
+
+    def space_workspace(self, meta: dict) -> str | None:
+        """タスクの space にあたる herdr のワークスペース。同じ space のタスクがいるワークスペースを優先し、
+        なければ同じ名前のワークスペースを使う。どちらもなければ None。"""
+        live = self.workspaces()
+        ids = {w["workspace_id"] for w in live}
+        for m in space_peers(meta["id"], task_space(meta)):
+            if m.get("workspace") in ids:
+                return m["workspace"]
+        return next((w["workspace_id"] for w in live if w.get("label") == task_space(meta)), None)
+
     def start_worker(self, meta: dict, settings: Path) -> str:
-        """タブを作り（フォーカスは移さない）、そのペインで Claude Code を起動する。ペイン ID を返す。"""
-        args = ["tab", "create", "--cwd", meta["repo"], "--label", tab_label(meta), "--no-focus",
-                "--env", f"SECRETARY_TASK_ID={meta['id']}", "--env", f"SECRETARY_HOME={home()}"]
-        # 秘書と同じワークスペースにタブを並べる（herdr のペインの中なら HERDR_WORKSPACE_ID がある）
-        workspace = os.environ.get("HERDR_WORKSPACE_ID")
-        try:
-            tab = self._run(*args, *(["--workspace", workspace] if workspace else []))
-        except HerdrError as e:
-            if e.code != "workspace_not_found":
-                raise
-            # 秘書が herdr の外にいて、アクティブなワークスペースもない
-            ws = self._run("workspace", "create", "--label", "secretary", "--no-focus")
-            tab = self._run(*args, "--workspace", ws["workspace"]["workspace_id"])
+        """タスクの space にタブを作り（フォーカスは移さない）、そのペインで Claude Code を起動する。ペイン ID を返す。
+        space がなければワークスペースを作り、その最初のタブをこのタスクのタブにする。"""
+        env = ["--env", f"SECRETARY_TASK_ID={meta['id']}", "--env", f"SECRETARY_HOME={home()}"]
+        tab = None
+        workspace = self.space_workspace(meta)
+        if workspace:
+            try:
+                tab = self._run("tab", "create", "--workspace", workspace, "--cwd", meta["repo"],
+                                "--label", tab_label(meta), "--no-focus", *env)
+            except HerdrError as e:
+                if e.code != "workspace_not_found":
+                    raise
+        if tab is None:
+            tab = self._run("workspace", "create", "--cwd", meta["repo"], "--label", task_space(meta), "--no-focus", *env)
+            workspace = tab["workspace"]["workspace_id"]
+            self._run("tab", "rename", tab["tab"]["tab_id"], tab_label(meta))
         pane = tab["root_pane"]["pane_id"]
+        meta["workspace"] = workspace
         meta["pane"] = pane
         meta["tab"] = tab.get("tab", {}).get("tab_id")
         return self.start_agent(meta, settings)
 
     def start_agent(self, meta: dict, settings: Path) -> str:
         pane = meta["pane"]
-        trust_repo_worktrees(meta, settings)
+        prepare_worker_settings(meta, settings)
         # agent start は Claude Code が入力を受け付けられる状態になってから返る。
         # 作ったばかりのタブはシェルのプロンプトが出る前だと agent_pane_busy になるので少し待つ
         for attempt in range(20):
@@ -669,6 +768,7 @@ def launch(meta: dict, herdr: Herdr) -> str | None:
 def send_first_prompt(meta: dict, herdr: Herdr) -> None:
     herdr.prompt(agent_name(meta), first_prompt(meta))
     meta["awaiting_ack_since"] = now_iso()
+    meta.pop("first_prompt_resent", None)
 
 
 def fill_slots(cfg: dict, herdr: Herdr) -> list[str]:
@@ -714,7 +814,7 @@ SECRETARY_CLAUDE_MD = """# 秘書エージェント
 
 あなたは shomrkm の秘書エージェント。振る舞いはすべて {skill} に従う。最初に必ず読むこと。
 
-- セッションを始めたら、すぐに Monitor ツールで `{sec} watch` を起動する（起動済みなら不要）
+- セッションを始めたら、すぐに Monitor ツールで `{sec} follow` を起動する（起動済みなら不要）
 - 続けて `{sec} list` と `{sec} inbox` を確認し、判断待ちがあれば最初に伝える
 - 自分ではコードを書かない
 """
@@ -752,6 +852,7 @@ def cmd_init(args) -> int:
     }
     # タスクフォルダと、リポジトリにルールがないときの作業場所と、repos.md の worktree 置き場は確認なしで触れるようにする
     trust_dirs(settings, [tasks_dir(), h / "worktrees", *repo_worktrees_dirs()])
+    settings["permissions"]["allow"] += worker_cli_rules()
     ws_path = h / "worker-settings.json"
     if ws_path.exists():
         # init のやり直し（hook の向き先を直すなど）で、sec allow で育てた許可リストや足したディレクトリを消さない
@@ -772,6 +873,11 @@ def cmd_init(args) -> int:
     claude_md = h / "CLAUDE.md"
     if not claude_md.exists():
         claude_md.write_text(SECRETARY_CLAUDE_MD.format(skill=SCRIPT_PATH.parent.parent / "SKILL.md", sec=wrapper))
+    else:
+        # Monitor で sec watch を直接動かすと、Monitor が切れたときに監視ループも止まる
+        text = claude_md.read_text()
+        if f"`{wrapper} watch`" in text:
+            claude_md.write_text(text.replace(f"`{wrapper} watch`", f"`{wrapper} follow`"))
     sec_settings_dir = h / ".claude"
     sec_settings_dir.mkdir(exist_ok=True)
     sec_settings = sec_settings_dir / "settings.json"
@@ -851,7 +957,7 @@ PROMPT_TEMPLATE = """# タスク {id}: {title}
 ## 依頼
 
 {request}
-
+{attachments}{peers}
 ## 完了条件
 
 {done}
@@ -865,6 +971,36 @@ PROMPT_TEMPLATE = """# タスク {id}: {title}
 - 判断に迷ったら、作業を止めて質問してください。秘書が人間に取り次ぎます。
 - タスクフォルダのほかのファイル（meta.json など）は秘書が管理しているので、読み書きしなくて大丈夫です。
 - 作業場所を用意したら、最初に 1 回だけ `cd <作業場所>` してください。以降の Bash はそこで 1 回に 1 コマンドずつ実行してください（`;` `&&` `|` でつながない、`git -C` や `npm --prefix` を使わない、変数に入れない）。こうしないと許可リストに当たらず、人間の確認待ちで止まります。
+"""
+
+
+def attachments_section(paths: list[Path]) -> str:
+    """依頼に添える資料。作業エージェントが読めない場所（人間の個人 Notion など）から秘書が取り出したもの。"""
+    if not paths:
+        return ""
+    items = "\n".join(f"- `{p}`" for p in paths)
+    return f"\n## 依頼に添える資料\n\n秘書が用意した資料です。作業を始める前に読んでください。\n\n{items}\n"
+
+
+def space_peers(task_id: str, space: str) -> list[dict]:
+    return [m for m in all_metas() if m["id"] != task_id and task_space(m) == space and m["status"] != CLOSED]
+
+
+def peer_rows(peers: list[dict]) -> str:
+    return "\n".join(f"- {m['id']}: {m['title']}（{Path(m['repo']).name}）" for m in peers) or "- （今はこのタスクだけ）"
+
+
+def peers_section(task_id: str, space: str) -> str:
+    """関連するタスクと同じ space で動くときに、作業エージェント同士で伝言を送る方法を伝える。"""
+    sec = home() / "bin" / "sec"
+    return f"""
+## 同じ space のタスク
+
+このタスクは herdr の space「{space}」で、関連するタスクと並んで動いています。いま同じ space にいるタスク:
+
+{peer_rows(space_peers(task_id, space))}
+
+相手に伝えたほうがいいこと（API の形が決まった、先にマージしてほしい、など）があれば、`{sec} send <タスク ID> "<伝言>"` で相手の作業エージェントに直接送ってください。伝言は秘書にも記録として届きます。相手からの伝言は `[secretary] <タスク ID> からの伝言` で始まります。後から加わったタスクも含めた今の一覧は `{sec} peers` で見られます。
 """
 
 
@@ -886,6 +1022,18 @@ def cmd_new(args) -> int:
         names = ", ".join(load_repos()) or "（repos.md が空）"
         print(f"リポジトリが見つかりません: {args.repo}（repos.md の名前: {names}）", file=sys.stderr)
         return 2
+    attach = [Path(a).expanduser() for a in args.attach]
+    missing = [str(a) for a in attach if not a.is_file()]
+    if missing:
+        print(f"--attach のファイルが見つかりません: {', '.join(missing)}", file=sys.stderr)
+        return 2
+    if len({a.name for a in attach}) != len(attach):
+        print("--attach に同じ名前のファイルがあります。名前を変えてから渡してください。", file=sys.stderr)
+        return 2
+    space = " ".join((args.space or "").split())
+    if args.space is not None and not space:
+        print("--space が空です。関連するタスクと同じ space に入れるなら、その名前を付けてください。", file=sys.stderr)
+        return 2
 
     cfg = load_config()
     if not args.no_launch:
@@ -899,12 +1047,21 @@ def cmd_new(args) -> int:
         tid = next_id()
         d = task_dir(tid)
         d.mkdir(parents=True)
+        attached = []
+        if attach:
+            (d / "attachments").mkdir()
+            for a in attach:
+                attached.append(d / "attachments" / a.name)
+                shutil.copyfile(a, attached[-1])
         (d / "prompt.md").write_text(PROMPT_TEMPLATE.format(
-            id=tid, title=args.title, request=request, done=done,
+            id=tid, title=args.title, request=request, done=done, attachments=attachments_section(attached),
+            peers=peers_section(tid, space) if space else "",
             status=d / "status.md", result=d / "result.md", worktree=home() / "worktrees" / tid))
         meta = {"id": tid, "title": args.title, "name": name, "repo": str(repo), "status": QUEUED,
                 "reason": "", "created_at": now_iso(), "status_since": now_iso(), "pane": None,
                 "history": []}
+        # --space がなければ、そのタスクだけの space を作る
+        meta["space"] = space or tab_label(meta)
         write_meta(meta)
         lines = [] if args.no_launch else fill_slots(cfg, Herdr(cfg))
     meta = read_meta(tid)
@@ -936,7 +1093,8 @@ def cmd_list(args) -> int:
     print(summary_line(metas))
     for m in metas:
         reason = f"（{m['reason']}）" if m.get("reason") and m["status"] in (BLOCKED, MANUAL) else ""
-        print(f"- {m['id']} [{m['status']} {ago(m.get('status_since'))}] {m['title']}{reason}  repo={Path(m['repo']).name}")
+        print(f"- {m['id']} [{m['status']} {ago(m.get('status_since'))}] {m['title']}{reason}  "
+              f"repo={Path(m['repo']).name} space={task_space(m)}")
     return 0
 
 
@@ -977,8 +1135,18 @@ def cmd_reply(args) -> int:
     if not meta.get("pane"):
         print("まだ起動していません。", file=sys.stderr)
         return 1
+    herdr = Herdr(load_config())
+    if not args.force:
+        typing = None
+        with contextlib.suppress(Exception):
+            typing = herdr.input_text(agent_name(meta))
+        if typing:
+            # agent prompt は入力欄に文字を打ち込むので、人間の打ちかけの文字と混ざって送られてしまう
+            print(f"{args.id} の入力欄に人間が打ちかけの文字があります（{typing[:60]}）。人間が入力中なので送りませんでした。"
+                  "人間に確かめてから、送ってよければ --force を付けてください。", file=sys.stderr)
+            return 1
     try:
-        Herdr(load_config()).prompt(agent_name(meta), f"{SECRETARY_MARK} {args.text}")
+        herdr.prompt(agent_name(meta), f"{SECRETARY_MARK} {args.text}")
     except HerdrError as e:
         if e.code == "agent_blocked" and asking_question(meta):
             print(f"{args.id} は選択式の質問を出しているので、文字では答えられません。"
@@ -999,13 +1167,85 @@ def cmd_reply(args) -> int:
     return 0
 
 
+def caller_task(command: str) -> dict | None:
+    """sec send / peers を呼んだ作業エージェントのタスク。作業エージェントのペインの外なら None。"""
+    task_id = hook_task_id()
+    if not task_id or not (task_dir(task_id) / "meta.json").exists():
+        print(f"sec {command} は作業エージェントのペインから使います（タスクが分かりません）。"
+              "秘書からタスクに送るときは sec reply を使ってください。", file=sys.stderr)
+        return None
+    return read_meta(task_id)
+
+
+def cmd_peers(args) -> int:
+    me = caller_task("peers")
+    if me is None:
+        return 1
+    print(f"space「{task_space(me)}」のタスク（あなたは {me['id']}）:")
+    print(peer_rows(space_peers(me["id"], task_space(me))))
+    return 0
+
+
+def cmd_send(args) -> int:
+    """作業エージェントから、同じ space のタスクの作業エージェントに伝言を送る。秘書の監視ループにも記録が届く。"""
+    me = caller_task("send")
+    if me is None:
+        return 1
+    text = args.text.strip()
+    if not text:
+        print("伝言が空です。", file=sys.stderr)
+        return 2
+    peers = {m["id"]: m for m in space_peers(me["id"], task_space(me))}
+    to = peers.get(args.id)
+    if to is None:
+        print(f"{args.id} は同じ space「{task_space(me)}」で動いているタスクではありません。送れる相手:\n"
+              f"{peer_rows(list(peers.values()))}", file=sys.stderr)
+        return 1
+    if not to.get("pane"):
+        print(f"{args.id} はまだ起動していません（{to['status']}）。起動してから送り直してください。", file=sys.stderr)
+        return 1
+    herdr = Herdr(load_config())
+    typing = None
+    with contextlib.suppress(Exception):
+        typing = herdr.input_text(agent_name(to))
+    if typing:
+        print(f"{args.id} の入力欄に人間が打ちかけの文字があるので送りませんでした。少し待ってから送り直すか、"
+              "急ぐなら status.md に書いて秘書に伝えてください。", file=sys.stderr)
+        return 1
+    sec = home() / "bin" / "sec"
+    try:
+        herdr.prompt(agent_name(to), f"{SECRETARY_MARK} {me['id']} からの伝言（同じ space のタスク。"
+                                     f"返事は `{sec} send {me['id']} \"...\"`）: {text}")
+    except HerdrError as e:
+        why = "許可や選択肢のダイアログで止まっている" if e.code == "agent_blocked" else str(e)
+        print(f"{args.id} に送れませんでした（{why}）。後で送り直すか、status.md に書いて秘書に伝えてください。", file=sys.stderr)
+        return 1
+    record_event({"time": now_iso(), "task_id": me["id"], "event": "Message", "to": args.id, "text": text})
+    with locked():
+        to = read_meta(args.id)
+        if to["status"] in (BLOCKED, REVIEW):
+            transition(to, RUNNING, f"{me['id']} から伝言が届いた")
+            write_meta(to)
+    print(f"{args.id} に送りました。秘書にも記録が届きます。")
+    return 0
+
+
+def message_line(ev: dict) -> str:
+    text = " ".join(ev.get("text", "").split())
+    if len(text) > 200:
+        text = text[:197] + "..."
+    return f"{SECRETARY_MARK} 伝言 {ev['task_id']}→{ev.get('to')}: {text}"
+
+
 def asking_question(meta: dict) -> bool:
     return (meta.get("pending_tool") or {}).get("name") == QUESTION_TOOL
 
 
 def cmd_choose(args) -> int:
     """選択式の質問（AskUserQuestion）で、人間が選んだ番号の選択肢を選ぶ。
-    カーソルは先頭の選択肢にあるので、下へ (番号 - 1) 回動かして Enter を送る。"""
+    カーソルは先頭の選択肢にあるので、下へ (番号 - 1) 回動かして Enter を送る。
+
+    --text のときは、選択肢の後ろにある「Type something.」までカーソルを動かし、文字を打って Enter を送る。"""
     meta = read_meta(args.id)
     if not meta.get("pane"):
         print("まだ起動していません。", file=sys.stderr)
@@ -1015,20 +1255,49 @@ def cmd_choose(args) -> int:
         print(f"{args.id} は選択式の質問を出していません（{meta['status']} {meta.get('reason', '')}）。"
               "許可ダイアログはペインで人間が答えてください。", file=sys.stderr)
         return 1
-    if args.number < 1:
+    if (args.number is None) == (args.text is None):
+        print("番号か --text のどちらか一方を指定してください。", file=sys.stderr)
+        return 2
+    if args.number is not None and args.number < 1:
         print("番号は 1 から数えます。", file=sys.stderr)
         return 2
+    tool = meta["pending_tool"]
+    questions = tool.get("questions") or []
+    answered = tool.get("answered", 0)
+    if args.text is not None:
+        question = questions[answered] if answered < len(questions) else None
+        if question is None or question.get("multiSelect"):
+            print(f"{args.id} の今の質問には --text で答えられません（選択肢が分からないか、複数選択）。"
+                  f"ペイン {meta['pane']} で直接答えてください。", file=sys.stderr)
+            return 1
+        text = " ".join(args.text.split())
+        if not text:
+            print("--text が空です。", file=sys.stderr)
+            return 2
     herdr = Herdr(load_config())
     name = agent_name(meta)
     try:
         if herdr.agent_statuses().get(name) not in ("blocked", None):
             print(f"{args.id} の画面は選択待ちになっていません。`sec peek {args.id}` で確認してください。", file=sys.stderr)
             return 1
-        herdr.send_keys(name, *(["down"] * (args.number - 1)), "enter")
+        if args.text is None:
+            herdr.send_keys(name, *(["down"] * (args.number - 1)), "enter")
+        else:
+            downs = ["down"] * len(question.get("options") or [])
+            if downs:
+                herdr.send_keys(name, *downs)
+            herdr.send_text(meta["pane"], text)
+            herdr.send_keys(name, "enter")
     except HerdrError as e:
         print(f"送れませんでした（{e}）。ペイン {meta['pane']} で直接答えてください。", file=sys.stderr)
         return 1
-    print(f"{args.id} で {args.number} 番を選びました。質問が複数あるときは次の質問に進むので、"
+    with locked():
+        meta = read_meta(args.id)
+        if asking_question(meta):
+            meta["pending_tool"]["answered"] = answered + 1
+            write_meta(meta)
+    what = f"{args.number} 番を選びました" if args.text is None else "自由記述で答えました"
+    print(f"{args.id} で {what}。質問が複数あるときは次の質問に進むので、"
           f"`sec peek {args.id}` で画面を確認してください。")
     return 0
 
@@ -1095,7 +1364,18 @@ def cmd_retry(args) -> int:
             if agent_name(meta) not in herdr.agent_names():
                 herdr.start_agent(meta, home() / "worker-settings.json")
                 meta.pop("agent_gone", None)
-            send_first_prompt(meta, herdr)
+            text = herdr.input_text(agent_name(meta))
+            if text and SECRETARY_MARK in text:
+                # 前に送った指示が入力欄に残っている。もう一度打つと 2 つ並ぶので、Enter だけ送る
+                herdr.send_keys(agent_name(meta), "enter")
+                meta["awaiting_ack_since"] = now_iso()
+            elif text:
+                write_meta(meta)
+                print(f"{args.id} の入力欄に人間が打ちかけの文字があります（{text[:60]}）。"
+                      "送ると混ざるので、人間に送るか消してもらってから retry してください。", file=sys.stderr)
+                return 1
+            else:
+                send_first_prompt(meta, herdr)
         except HerdrError as e:
             write_meta(meta)
             if e.code in ("agent_not_ready", "agent_blocked"):
@@ -1123,14 +1403,41 @@ def cmd_handback(args) -> int:
     return 0
 
 
+def close_task_tab(meta: dict, herdr: Herdr) -> str:
+    """タスクのタブを閉じる。space に残るのがこのタブだけで、同じ space に閉じていないタスクもなければ、
+    space（ワークスペース）ごと閉じる。人間が足したタブや --keep-tab で残したタブがあれば space は残す。"""
+    ws = meta.get("workspace")
+    if ws and not any(m.get("workspace") == ws for m in space_peers(meta["id"], task_space(meta))):
+        tabs = None
+        with contextlib.suppress(HerdrError):
+            tabs = herdr.tab_ids(ws)
+        if tabs == {meta["tab"]}:
+            herdr.close_workspace(ws)
+            return f"space「{task_space(meta)}」の最後のタスクだったので、space（{ws}）ごと閉じました"
+    herdr.close_tab(meta["tab"])
+    return f"タブ {meta['tab']} を閉じました"
+
+
 def cmd_close(args) -> int:
+    """タスクを閉じ、タブも閉じる（中の Claude Code も終わる）。worktree は消さない。"""
     cfg = load_config()
+    herdr = Herdr(cfg)
     with locked():
         meta = read_meta(args.id)
         transition(meta, CLOSED, args.reason or "")
         write_meta(meta)
-        lines = fill_slots(cfg, Herdr(cfg))
-    print(f"{args.id} を閉じました。タブや作業場所は残っています（pane={meta.get('pane')}）。")
+        lines = fill_slots(cfg, herdr)
+    tab_note = "タブは残しています"
+    if meta.get("tab") and not args.keep_tab:
+        try:
+            if meta.get("pane") in herdr.pane_ids():
+                tab_note = close_task_tab(meta, herdr)
+            else:
+                tab_note = "タブはもうありません"
+        except HerdrError as e:
+            tab_note = f"タブを閉じられませんでした（{e}）"
+    print(f"{args.id} を閉じました。{tab_note}。作業場所（worktree）は残っています。"
+          f"消すなら `sec cleanup {args.id}` で候補を人間に見せてください。")
     for line in lines:
         print(line)
     return 0
@@ -1203,8 +1510,7 @@ def cmd_cleanup(args) -> int:
     failed = False
     if tab_alive:
         try:
-            herdr.close_tab(meta["tab"])
-            print(f"タブ {meta['tab']} を閉じました。")
+            print(f"{close_task_tab(meta, herdr)}。")
         except HerdrError as e:
             failed = True
             print(f"タブを閉じられませんでした（{e}）。", file=sys.stderr)
@@ -1280,8 +1586,68 @@ def hook_task_id() -> str | None:
     return max(owners, key=lambda m: parse_iso(m.get("started_at")))["id"] if owners else None
 
 
+def worktree_roots() -> list[Path]:
+    """タスクの worktree が置かれる場所。worker-settings で信頼したディレクトリ（タスクフォルダは除く）と、
+    Claude Code 自身の worktree 置き場（<repo>/.claude/worktrees）。"""
+    roots: list[Path] = []
+    with contextlib.suppress(Exception):
+        settings = json.loads((home() / "worker-settings.json").read_text())
+        roots += [Path(d) for d in settings["permissions"].get("additionalDirectories", [])]
+    roots += [p / ".claude" / "worktrees" for p in load_repos().values()]
+    return [r.expanduser().resolve() for r in roots if r.expanduser().resolve() != tasks_dir()]
+
+
+def auto_allowed_edit(tool: str, inp: dict) -> bool:
+    """タスクの worktree の中の .claude/skills/ などへの編集か。
+
+    .claude/ は保護パスで、許可リストや acceptEdits、PreToolUse hook の permissionDecision: allow でも
+    確認が出る。PermissionRequest hook が allow を返したときだけ確認なしで通る。"""
+    if tool not in EDIT_TOOLS or not inp.get("file_path"):
+        return False
+    path = Path(inp["file_path"]).expanduser().resolve()
+    for root in worktree_roots():
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            continue
+        # <置き場>/<worktree>/.../.claude/<skills など>/<ファイル>
+        if ".claude" in parts[1:]:
+            i = parts.index(".claude", 1)
+            if len(parts) > i + 2 and parts[i + 1] in AUTO_ALLOW_CLAUDE_DIRS:
+                return True
+    return False
+
+
+def last_turn_is_bash_mode(transcript_path: str | None) -> bool:
+    """会話の最後のやりとりが bash モードの入力か。bash モードでは UserPromptSubmit が来ず Stop だけが来る。"""
+    if not transcript_path:
+        return False
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 256 * 1024))
+            tail = f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return False
+    for raw in reversed(tail):
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if entry.get("type") not in ("user", "assistant") or entry.get("isMeta"):
+            continue
+        if entry["type"] == "assistant":
+            return False
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, list):
+            content = next((c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"), "")
+        return isinstance(content, str) and content.lstrip().startswith(BASH_MODE_PREFIXES)
+    return False
+
+
 def cmd_hook(args) -> int:
-    """作業エージェントの hook。何も出力しない（UserPromptSubmit の出力は文脈に混ざるため）。"""
+    """作業エージェントの hook。PermissionRequest で自動許可するときだけ判定を出力する
+    （UserPromptSubmit の出力は文脈に混ざるため、ほかは何も出さない）。"""
     task_id = hook_task_id()
     if not task_id:
         return 0
@@ -1292,8 +1658,13 @@ def cmd_hook(args) -> int:
     ev = {"time": now_iso(), "task_id": task_id, "event": data.get("hook_event_name", "")}
     if ev["event"] == "UserPromptSubmit":
         prompt = (data.get("prompt") or "").lstrip()
+        if m := PASTED_CONTENT_RE.match(prompt):
+            prompt = prompt[m.end():]
         ev["from_secretary"] = prompt.startswith(SECRETARY_MARK)
         ev["from_system"] = prompt.startswith(SYSTEM_PROMPT_PREFIXES)
+    elif ev["event"] == "Stop":
+        if last_turn_is_bash_mode(data.get("transcript_path")):
+            ev["bash_mode"] = True
     elif ev["event"] == "Notification":
         ev["message"] = data.get("message", "")
     elif ev["event"] in ("PreToolUse", "PermissionRequest"):
@@ -1305,15 +1676,23 @@ def cmd_hook(args) -> int:
                 {"question": q.get("question", ""), "multiSelect": bool(q.get("multiSelect")),
                  "options": [o.get("label", "") for o in q.get("options") or [] if isinstance(o, dict)]}
                 for q in inp["questions"] if isinstance(q, dict)]
+        if ev["event"] == "PermissionRequest" and auto_allowed_edit(ev["tool"], inp):
+            ev["auto_allowed"] = True
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                                     "decision": {"behavior": "allow"}}}))
     elif ev["event"] in ("PostToolUse", "PostToolUseFailure"):
         ev["tool"] = data.get("tool_name", "")
+    record_event(ev)
+    return 0
+
+
+def record_event(ev: dict) -> None:
     line = json.dumps(ev, ensure_ascii=False) + "\n"
     fd = os.open(events_path(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
         os.write(fd, line.encode())
     finally:
         os.close(fd)
-    return 0
 
 
 def notify(line: str, cfg: dict) -> None:
@@ -1370,6 +1749,7 @@ def cmd_watch(args) -> int:
 
     while True:
         lines: list[str] = []
+        records: list[str] = []
         with locked():
             # 1. hook のイベントを反映
             if offset_path.exists():
@@ -1386,6 +1766,9 @@ def cmd_watch(args) -> int:
                 for raw in complete.decode().splitlines():
                     try:
                         ev = json.loads(raw)
+                        if ev.get("event") == "Message":
+                            records.append(message_line(ev))
+                            continue
                         meta = read_meta(ev["task_id"])
                     except Exception:
                         continue
@@ -1404,9 +1787,12 @@ def cmd_watch(args) -> int:
                 except Exception as e:
                     lines.append(f"[secretary] snapshot に失敗: {e}")
             for meta in all_metas():
-                line = periodic_checks(meta, cfg, live, check_silence=live is not None or not use_snapshot)
-                if line:
+                before = json.dumps(meta, sort_keys=True)
+                line = periodic_checks(meta, cfg, live, check_silence=live is not None or not use_snapshot,
+                                       herdr=herdr if use_snapshot else None)
+                if json.dumps(meta, sort_keys=True) != before:
                     write_meta(meta)
+                if line:
                     lines.append(line)
 
             # 3. 空きがあればキューから起動
@@ -1421,12 +1807,103 @@ def cmd_watch(args) -> int:
         elif flag.exists() and backlog < limit:
             flag.unlink()
 
-        for line in lines:
-            print(line, flush=True)
-            notify(line, cfg)
+        emit(lines, cfg, records)
         if args.once:
             return 0
         time.sleep(cfg["poll_interval_sec"])
+
+
+def quiet_window(cfg: dict) -> tuple[str, str] | None:
+    m = re.fullmatch(r"\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*", cfg.get("quiet_hours") or "")
+    return (m.group(1), m.group(2)) if m else None
+
+
+def in_quiet_hours(cfg: dict, now: datetime | None = None) -> bool:
+    window = quiet_window(cfg)
+    if not window:
+        return False
+    now = now or datetime.now()
+    minutes = now.hour * 60 + now.minute
+    start, end = (int(h) * 60 + int(m) for h, m in (t.split(":") for t in window))
+    if start == end:
+        return False
+    return start <= minutes < end if start < end else minutes >= start or minutes < end
+
+
+def emit(lines: list[str], cfg: dict, records: list[str] = ()) -> None:
+    """通知を出す。静かな時間帯（quiet_hours）は溜めておき、明けたら 1 行にまとめて出す。
+    records（作業エージェント同士の伝言）は秘書への記録なので、デスクトップ通知は出さない。"""
+    pending = home() / ".quiet-pending"
+    if in_quiet_hours(cfg):
+        if lines or records:
+            with open(pending, "a") as f:
+                f.writelines(line + "\n" for line in [*lines, *records])
+        return
+    if pending.exists():
+        held = [l for l in pending.read_text().splitlines() if l]
+        pending.unlink()
+        if held:
+            window = "〜".join(quiet_window(cfg) or ()) or "静かな時間帯"
+            joined = " / ".join(l.removeprefix(f"{SECRETARY_MARK} ") for l in held)
+            lines = [f"{SECRETARY_MARK} 通知を止めていた間（{window}）の変化 {len(held)} 件: {joined}", *lines]
+    for line in lines:
+        print(line, flush=True)
+        notify(line, cfg)
+    for line in records:
+        print(line, flush=True)
+
+
+def watch_alive() -> bool:
+    try:
+        os.kill(int((home() / ".watch.pid").read_text()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def ensure_watch() -> None:
+    """監視ループを裏で動かす。Monitor が切れても止まらないよう、秘書のセッションから切り離して起動する。"""
+    if watch_alive():
+        return
+    with open(home() / "watch.log", "ab") as out, open(home() / "watch.err", "ab") as err:
+        subprocess.Popen([sys.executable, str(SCRIPT_PATH), "watch"], stdin=subprocess.DEVNULL, stdout=out,
+                         stderr=err, cwd=home(), start_new_session=True)
+    for _ in range(50):
+        if watch_alive():
+            return
+        time.sleep(0.1)
+
+
+def cmd_follow(args) -> int:
+    """監視ループ（裏で動く sec watch）の出力を、まだ出していない行から出す。
+    Monitor が 30 分で切れても監視ループは動き続け、張り直したときに切れていた間の行が出る。"""
+    log, offset_path = home() / "watch.log", home() / ".follow-offset"
+    ensure_watch()
+    if offset_path.exists():
+        offset = int(offset_path.read_text() or 0)
+    else:
+        offset = log.stat().st_size if log.exists() else 0
+    last_check = time.time()
+    while True:
+        size = log.stat().st_size if log.exists() else 0
+        if size < offset:
+            offset = 0
+        if size > offset:
+            with open(log, "rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+            complete = chunk[: chunk.rfind(b"\n") + 1]
+            if complete:
+                sys.stdout.write(complete.decode(errors="replace"))
+                sys.stdout.flush()
+                offset += len(complete)
+                offset_path.write_text(str(offset))
+                if args.once:
+                    return 0
+        if time.time() - last_check > 10:
+            last_check = time.time()
+            ensure_watch()
+        time.sleep(0.5)
 
 
 def main(argv=None) -> int:
@@ -1441,8 +1918,19 @@ def main(argv=None) -> int:
     s.add_argument("--name", help="タブに出す短い英語名（例: fix-order-query）。省略すると英語の題から作る")
     s.add_argument("--done", help="完了条件（人間から受け取ったものをそのまま）")
     s.add_argument("--request", help="依頼内容。省略すると標準入力から読む")
+    s.add_argument("--attach", action="append", default=[], metavar="FILE",
+                   help="依頼に添える資料。タスクフォルダにコピーし、prompt.md にパスを書く（何度でも指定できる）")
+    s.add_argument("--space", help="タスクを置く herdr の space（ワークスペース）の名前。同じ名前の space があればそこにタブを足し、"
+                                   "なければ作る。関連するタスクは同じ space にする。省略するとそのタスクだけの space を作る")
     s.add_argument("--no-launch", action="store_true")
     s.set_defaults(func=cmd_new)
+
+    s = sub.add_parser("send")
+    s.add_argument("id")
+    s.add_argument("text")
+    s.set_defaults(func=cmd_send)
+
+    sub.add_parser("peers").set_defaults(func=cmd_peers)
 
     s = sub.add_parser("list")
     s.add_argument("--json", action="store_true")
@@ -1464,11 +1952,13 @@ def main(argv=None) -> int:
     s = sub.add_parser("reply")
     s.add_argument("id")
     s.add_argument("text")
+    s.add_argument("--force", action="store_true", help="人間が入力欄に打ちかけていても送る（人間が OK したときだけ）")
     s.set_defaults(func=cmd_reply)
 
     s = sub.add_parser("choose")
     s.add_argument("id")
-    s.add_argument("number", type=int, help="選択肢の番号（1 から）")
+    s.add_argument("number", type=int, nargs="?", help="選択肢の番号（1 から）")
+    s.add_argument("--text", help="選択肢にない答え。「Type something.」に打ち込んで送る")
     s.set_defaults(func=cmd_choose)
 
     s = sub.add_parser("cleanup")
@@ -1493,6 +1983,7 @@ def main(argv=None) -> int:
     s = sub.add_parser("close")
     s.add_argument("id")
     s.add_argument("--reason")
+    s.add_argument("--keep-tab", action="store_true", help="タブを閉じずに残す")
     s.set_defaults(func=cmd_close)
 
     sub.add_parser("hook").set_defaults(func=cmd_hook)
@@ -1500,6 +1991,10 @@ def main(argv=None) -> int:
     s = sub.add_parser("watch")
     s.add_argument("--once", action="store_true", help="1 周だけ回して終わる（テスト用）")
     s.set_defaults(func=cmd_watch)
+
+    s = sub.add_parser("follow")
+    s.add_argument("--once", action="store_true", help="新しい行が出たら、それを出して終わる")
+    s.set_defaults(func=cmd_follow)
 
     args = p.parse_args(argv)
     return args.func(args)
