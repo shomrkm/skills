@@ -394,6 +394,8 @@ watch >/dev/null
 
 # peek は agent read で直近の画面を読む
 expect "(screen of t004-" "$($SEC peek t004)"
+# peek は 60 行で打ち切る
+expect "60 行までです" "$($SEC peek t004 --lines 500 2>&1 >/dev/null)"
 
 # hook が届かないと running のまま時間だけが過ぎる。判定の前に herdr の agent_status を見て補正する
 stale() { # stale HERDR_STATUS [pending_tool]

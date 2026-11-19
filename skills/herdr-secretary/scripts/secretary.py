@@ -1121,12 +1121,18 @@ def cmd_show(args) -> int:
     return 0
 
 
+PEEK_MAX_LINES = 60  # 秘書のコンテキストを守る
+
+
 def cmd_peek(args) -> int:
     meta = read_meta(args.id)
     if not meta.get("pane"):
         print("まだ起動していません。", file=sys.stderr)
         return 1
-    print(Herdr(load_config()).read(agent_name(meta), args.lines))
+    lines = min(args.lines, PEEK_MAX_LINES)
+    if lines < args.lines:
+        print(f"（--lines は {PEEK_MAX_LINES} 行までです。{lines} 行で読みます）", file=sys.stderr)
+    print(Herdr(load_config()).read(agent_name(meta), lines))
     return 0
 
 
