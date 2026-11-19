@@ -15,7 +15,9 @@
   allow RULE...              作業エージェントの許可リストにルールを足す（例: "Bash(git worktree:*)"）
   retry ID                   最初の指示を送り直す（起動画面で止まっていたとき）
   handback ID                manual（人間が介入中）を解除して秘書に戻す
-  close ID [--keep-tab]      タスクを閉じ、タブも閉じる（作業場所は消さない）
+  send ID TEXT               作業エージェントから、同じ space のタスクに伝言を送る（作業エージェントが使う）
+  peers                      作業エージェントから、同じ space のタスクの一覧を見る（作業エージェントが使う）
+  close ID [--keep-tab]      タスクを閉じ、タブも閉じる。space の最後のタスクなら space も閉じる（作業場所は消さない）
   cleanup ID [--yes]         閉じたタスクのタブと worktree を片付ける（--yes なしは確認だけ）
   doctor                     herdr の版・サーバー、hook の向き先、スキルの更新漏れを確かめる
   watch                      監視ループ。状態が変わったときだけ 1 行出力する
@@ -497,15 +499,23 @@ def trust_dirs(settings: dict, dirs: list[Path]) -> None:
         allow += [r for r in (f"Edit(/{d}/**)", f"Read(/{d}/**)") if r not in allow]
 
 
-def trust_repo_worktrees(meta: dict, settings_path: Path) -> None:
-    """repos.md は init の後にも書き足されるので、起動のたびにそのリポジトリの worktree 置き場を設定に足す。"""
-    wt = repo_worktrees_dir(Path(meta["repo"]))
-    if not wt:
-        return
-    wt.mkdir(parents=True, exist_ok=True)
+def worker_cli_rules() -> list[str]:
+    """作業エージェントが確認なしで使える sec のサブコマンド（同じ space のタスクとのやり取り）。"""
+    wrapper = home() / "bin" / "sec"
+    return [f"Bash({wrapper} send:*)", f"Bash({wrapper} peers:*)"]
+
+
+def prepare_worker_settings(meta: dict, settings_path: Path) -> None:
+    """repos.md は init の後にも書き足されるので、起動のたびにそのリポジトリの worktree 置き場を設定に足す。
+    sec send / peers の許可も、init をやり直していない秘書ディレクトリに足す。"""
     settings = json.loads(settings_path.read_text())
     before = json.dumps(settings)
-    trust_dirs(settings, [wt])
+    wt = repo_worktrees_dir(Path(meta["repo"]))
+    if wt:
+        wt.mkdir(parents=True, exist_ok=True)
+        trust_dirs(settings, [wt])
+    allow = settings["permissions"].setdefault("allow", [])
+    allow += [r for r in worker_cli_rules() if r not in allow]
     if json.dumps(settings) != before:
         settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
 
@@ -535,6 +545,11 @@ def tab_name(text: str) -> str:
 def tab_label(meta: dict) -> str:
     """herdr のタブのラベル。秘書も人間もタスクを ID で呼ぶので、ID の後ろに内容がわかる英語名を付ける。"""
     return f"{meta['id']} {meta['name']}" if meta.get("name") else meta["id"]
+
+
+def task_space(meta: dict) -> str:
+    """タスクを置く space（herdr のワークスペース）の名前。関連するタスクは同じ space に並べる。"""
+    return meta.get("space") or tab_label(meta)
 
 
 def home_tag() -> str:
@@ -660,28 +675,51 @@ class Herdr:
     def close_tab(self, tab: str) -> None:
         self._run("tab", "close", tab)
 
+    def workspaces(self) -> list[dict]:
+        return self._run("workspace", "list").get("workspaces", [])
+
+    def tab_ids(self, workspace: str) -> set[str]:
+        return {t["tab_id"] for t in self._run("tab", "list", "--workspace", workspace).get("tabs", [])}
+
+    def close_workspace(self, workspace: str) -> None:
+        self._run("workspace", "close", workspace)
+
+    def space_workspace(self, meta: dict) -> str | None:
+        """タスクの space にあたる herdr のワークスペース。同じ space のタスクがいるワークスペースを優先し、
+        なければ同じ名前のワークスペースを使う。どちらもなければ None。"""
+        live = self.workspaces()
+        ids = {w["workspace_id"] for w in live}
+        for m in space_peers(meta["id"], task_space(meta)):
+            if m.get("workspace") in ids:
+                return m["workspace"]
+        return next((w["workspace_id"] for w in live if w.get("label") == task_space(meta)), None)
+
     def start_worker(self, meta: dict, settings: Path) -> str:
-        """タブを作り（フォーカスは移さない）、そのペインで Claude Code を起動する。ペイン ID を返す。"""
-        args = ["tab", "create", "--cwd", meta["repo"], "--label", tab_label(meta), "--no-focus",
-                "--env", f"SECRETARY_TASK_ID={meta['id']}", "--env", f"SECRETARY_HOME={home()}"]
-        # 秘書と同じワークスペースにタブを並べる（herdr のペインの中なら HERDR_WORKSPACE_ID がある）
-        workspace = os.environ.get("HERDR_WORKSPACE_ID")
-        try:
-            tab = self._run(*args, *(["--workspace", workspace] if workspace else []))
-        except HerdrError as e:
-            if e.code != "workspace_not_found":
-                raise
-            # 秘書が herdr の外にいて、アクティブなワークスペースもない
-            ws = self._run("workspace", "create", "--label", "secretary", "--no-focus")
-            tab = self._run(*args, "--workspace", ws["workspace"]["workspace_id"])
+        """タスクの space にタブを作り（フォーカスは移さない）、そのペインで Claude Code を起動する。ペイン ID を返す。
+        space がなければワークスペースを作り、その最初のタブをこのタスクのタブにする。"""
+        env = ["--env", f"SECRETARY_TASK_ID={meta['id']}", "--env", f"SECRETARY_HOME={home()}"]
+        tab = None
+        workspace = self.space_workspace(meta)
+        if workspace:
+            try:
+                tab = self._run("tab", "create", "--workspace", workspace, "--cwd", meta["repo"],
+                                "--label", tab_label(meta), "--no-focus", *env)
+            except HerdrError as e:
+                if e.code != "workspace_not_found":
+                    raise
+        if tab is None:
+            tab = self._run("workspace", "create", "--cwd", meta["repo"], "--label", task_space(meta), "--no-focus", *env)
+            workspace = tab["workspace"]["workspace_id"]
+            self._run("tab", "rename", tab["tab"]["tab_id"], tab_label(meta))
         pane = tab["root_pane"]["pane_id"]
+        meta["workspace"] = workspace
         meta["pane"] = pane
         meta["tab"] = tab.get("tab", {}).get("tab_id")
         return self.start_agent(meta, settings)
 
     def start_agent(self, meta: dict, settings: Path) -> str:
         pane = meta["pane"]
-        trust_repo_worktrees(meta, settings)
+        prepare_worker_settings(meta, settings)
         # agent start は Claude Code が入力を受け付けられる状態になってから返る。
         # 作ったばかりのタブはシェルのプロンプトが出る前だと agent_pane_busy になるので少し待つ
         for attempt in range(20):
@@ -814,6 +852,7 @@ def cmd_init(args) -> int:
     }
     # タスクフォルダと、リポジトリにルールがないときの作業場所と、repos.md の worktree 置き場は確認なしで触れるようにする
     trust_dirs(settings, [tasks_dir(), h / "worktrees", *repo_worktrees_dirs()])
+    settings["permissions"]["allow"] += worker_cli_rules()
     ws_path = h / "worker-settings.json"
     if ws_path.exists():
         # init のやり直し（hook の向き先を直すなど）で、sec allow で育てた許可リストや足したディレクトリを消さない
@@ -918,7 +957,7 @@ PROMPT_TEMPLATE = """# タスク {id}: {title}
 ## 依頼
 
 {request}
-{attachments}
+{attachments}{peers}
 ## 完了条件
 
 {done}
@@ -941,6 +980,28 @@ def attachments_section(paths: list[Path]) -> str:
         return ""
     items = "\n".join(f"- `{p}`" for p in paths)
     return f"\n## 依頼に添える資料\n\n秘書が用意した資料です。作業を始める前に読んでください。\n\n{items}\n"
+
+
+def space_peers(task_id: str, space: str) -> list[dict]:
+    return [m for m in all_metas() if m["id"] != task_id and task_space(m) == space and m["status"] != CLOSED]
+
+
+def peer_rows(peers: list[dict]) -> str:
+    return "\n".join(f"- {m['id']}: {m['title']}（{Path(m['repo']).name}）" for m in peers) or "- （今はこのタスクだけ）"
+
+
+def peers_section(task_id: str, space: str) -> str:
+    """関連するタスクと同じ space で動くときに、作業エージェント同士で伝言を送る方法を伝える。"""
+    sec = home() / "bin" / "sec"
+    return f"""
+## 同じ space のタスク
+
+このタスクは herdr の space「{space}」で、関連するタスクと並んで動いています。いま同じ space にいるタスク:
+
+{peer_rows(space_peers(task_id, space))}
+
+相手に伝えたほうがいいこと（API の形が決まった、先にマージしてほしい、など）があれば、`{sec} send <タスク ID> "<伝言>"` で相手の作業エージェントに直接送ってください。伝言は秘書にも記録として届きます。相手からの伝言は `[secretary] <タスク ID> からの伝言` で始まります。後から加わったタスクも含めた今の一覧は `{sec} peers` で見られます。
+"""
 
 
 def cmd_new(args) -> int:
@@ -969,6 +1030,10 @@ def cmd_new(args) -> int:
     if len({a.name for a in attach}) != len(attach):
         print("--attach に同じ名前のファイルがあります。名前を変えてから渡してください。", file=sys.stderr)
         return 2
+    space = " ".join((args.space or "").split())
+    if args.space is not None and not space:
+        print("--space が空です。関連するタスクと同じ space に入れるなら、その名前を付けてください。", file=sys.stderr)
+        return 2
 
     cfg = load_config()
     if not args.no_launch:
@@ -990,10 +1055,13 @@ def cmd_new(args) -> int:
                 shutil.copyfile(a, attached[-1])
         (d / "prompt.md").write_text(PROMPT_TEMPLATE.format(
             id=tid, title=args.title, request=request, done=done, attachments=attachments_section(attached),
+            peers=peers_section(tid, space) if space else "",
             status=d / "status.md", result=d / "result.md", worktree=home() / "worktrees" / tid))
         meta = {"id": tid, "title": args.title, "name": name, "repo": str(repo), "status": QUEUED,
                 "reason": "", "created_at": now_iso(), "status_since": now_iso(), "pane": None,
                 "history": []}
+        # --space がなければ、そのタスクだけの space を作る
+        meta["space"] = space or tab_label(meta)
         write_meta(meta)
         lines = [] if args.no_launch else fill_slots(cfg, Herdr(cfg))
     meta = read_meta(tid)
@@ -1025,7 +1093,8 @@ def cmd_list(args) -> int:
     print(summary_line(metas))
     for m in metas:
         reason = f"（{m['reason']}）" if m.get("reason") and m["status"] in (BLOCKED, MANUAL) else ""
-        print(f"- {m['id']} [{m['status']} {ago(m.get('status_since'))}] {m['title']}{reason}  repo={Path(m['repo']).name}")
+        print(f"- {m['id']} [{m['status']} {ago(m.get('status_since'))}] {m['title']}{reason}  "
+              f"repo={Path(m['repo']).name} space={task_space(m)}")
     return 0
 
 
@@ -1096,6 +1165,76 @@ def cmd_reply(args) -> int:
             write_meta(meta)
     print(f"{args.id} に送りました。")
     return 0
+
+
+def caller_task(command: str) -> dict | None:
+    """sec send / peers を呼んだ作業エージェントのタスク。作業エージェントのペインの外なら None。"""
+    task_id = hook_task_id()
+    if not task_id or not (task_dir(task_id) / "meta.json").exists():
+        print(f"sec {command} は作業エージェントのペインから使います（タスクが分かりません）。"
+              "秘書からタスクに送るときは sec reply を使ってください。", file=sys.stderr)
+        return None
+    return read_meta(task_id)
+
+
+def cmd_peers(args) -> int:
+    me = caller_task("peers")
+    if me is None:
+        return 1
+    print(f"space「{task_space(me)}」のタスク（あなたは {me['id']}）:")
+    print(peer_rows(space_peers(me["id"], task_space(me))))
+    return 0
+
+
+def cmd_send(args) -> int:
+    """作業エージェントから、同じ space のタスクの作業エージェントに伝言を送る。秘書の監視ループにも記録が届く。"""
+    me = caller_task("send")
+    if me is None:
+        return 1
+    text = args.text.strip()
+    if not text:
+        print("伝言が空です。", file=sys.stderr)
+        return 2
+    peers = {m["id"]: m for m in space_peers(me["id"], task_space(me))}
+    to = peers.get(args.id)
+    if to is None:
+        print(f"{args.id} は同じ space「{task_space(me)}」で動いているタスクではありません。送れる相手:\n"
+              f"{peer_rows(list(peers.values()))}", file=sys.stderr)
+        return 1
+    if not to.get("pane"):
+        print(f"{args.id} はまだ起動していません（{to['status']}）。起動してから送り直してください。", file=sys.stderr)
+        return 1
+    herdr = Herdr(load_config())
+    typing = None
+    with contextlib.suppress(Exception):
+        typing = herdr.input_text(agent_name(to))
+    if typing:
+        print(f"{args.id} の入力欄に人間が打ちかけの文字があるので送りませんでした。少し待ってから送り直すか、"
+              "急ぐなら status.md に書いて秘書に伝えてください。", file=sys.stderr)
+        return 1
+    sec = home() / "bin" / "sec"
+    try:
+        herdr.prompt(agent_name(to), f"{SECRETARY_MARK} {me['id']} からの伝言（同じ space のタスク。"
+                                     f"返事は `{sec} send {me['id']} \"...\"`）: {text}")
+    except HerdrError as e:
+        why = "許可や選択肢のダイアログで止まっている" if e.code == "agent_blocked" else str(e)
+        print(f"{args.id} に送れませんでした（{why}）。後で送り直すか、status.md に書いて秘書に伝えてください。", file=sys.stderr)
+        return 1
+    record_event({"time": now_iso(), "task_id": me["id"], "event": "Message", "to": args.id, "text": text})
+    with locked():
+        to = read_meta(args.id)
+        if to["status"] in (BLOCKED, REVIEW):
+            transition(to, RUNNING, f"{me['id']} から伝言が届いた")
+            write_meta(to)
+    print(f"{args.id} に送りました。秘書にも記録が届きます。")
+    return 0
+
+
+def message_line(ev: dict) -> str:
+    text = " ".join(ev.get("text", "").split())
+    if len(text) > 200:
+        text = text[:197] + "..."
+    return f"{SECRETARY_MARK} 伝言 {ev['task_id']}→{ev.get('to')}: {text}"
 
 
 def asking_question(meta: dict) -> bool:
@@ -1264,6 +1403,21 @@ def cmd_handback(args) -> int:
     return 0
 
 
+def close_task_tab(meta: dict, herdr: Herdr) -> str:
+    """タスクのタブを閉じる。space に残るのがこのタブだけで、同じ space に閉じていないタスクもなければ、
+    space（ワークスペース）ごと閉じる。人間が足したタブや --keep-tab で残したタブがあれば space は残す。"""
+    ws = meta.get("workspace")
+    if ws and not any(m.get("workspace") == ws for m in space_peers(meta["id"], task_space(meta))):
+        tabs = None
+        with contextlib.suppress(HerdrError):
+            tabs = herdr.tab_ids(ws)
+        if tabs == {meta["tab"]}:
+            herdr.close_workspace(ws)
+            return f"space「{task_space(meta)}」の最後のタスクだったので、space（{ws}）ごと閉じました"
+    herdr.close_tab(meta["tab"])
+    return f"タブ {meta['tab']} を閉じました"
+
+
 def cmd_close(args) -> int:
     """タスクを閉じ、タブも閉じる（中の Claude Code も終わる）。worktree は消さない。"""
     cfg = load_config()
@@ -1277,8 +1431,7 @@ def cmd_close(args) -> int:
     if meta.get("tab") and not args.keep_tab:
         try:
             if meta.get("pane") in herdr.pane_ids():
-                herdr.close_tab(meta["tab"])
-                tab_note = f"タブ {meta['tab']} を閉じました"
+                tab_note = close_task_tab(meta, herdr)
             else:
                 tab_note = "タブはもうありません"
         except HerdrError as e:
@@ -1357,8 +1510,7 @@ def cmd_cleanup(args) -> int:
     failed = False
     if tab_alive:
         try:
-            herdr.close_tab(meta["tab"])
-            print(f"タブ {meta['tab']} を閉じました。")
+            print(f"{close_task_tab(meta, herdr)}。")
         except HerdrError as e:
             failed = True
             print(f"タブを閉じられませんでした（{e}）。", file=sys.stderr)
@@ -1530,13 +1682,17 @@ def cmd_hook(args) -> int:
                                                      "decision": {"behavior": "allow"}}}))
     elif ev["event"] in ("PostToolUse", "PostToolUseFailure"):
         ev["tool"] = data.get("tool_name", "")
+    record_event(ev)
+    return 0
+
+
+def record_event(ev: dict) -> None:
     line = json.dumps(ev, ensure_ascii=False) + "\n"
     fd = os.open(events_path(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
         os.write(fd, line.encode())
     finally:
         os.close(fd)
-    return 0
 
 
 def notify(line: str, cfg: dict) -> None:
@@ -1593,6 +1749,7 @@ def cmd_watch(args) -> int:
 
     while True:
         lines: list[str] = []
+        records: list[str] = []
         with locked():
             # 1. hook のイベントを反映
             if offset_path.exists():
@@ -1609,6 +1766,9 @@ def cmd_watch(args) -> int:
                 for raw in complete.decode().splitlines():
                     try:
                         ev = json.loads(raw)
+                        if ev.get("event") == "Message":
+                            records.append(message_line(ev))
+                            continue
                         meta = read_meta(ev["task_id"])
                     except Exception:
                         continue
@@ -1647,7 +1807,7 @@ def cmd_watch(args) -> int:
         elif flag.exists() and backlog < limit:
             flag.unlink()
 
-        emit(lines, cfg)
+        emit(lines, cfg, records)
         if args.once:
             return 0
         time.sleep(cfg["poll_interval_sec"])
@@ -1670,13 +1830,14 @@ def in_quiet_hours(cfg: dict, now: datetime | None = None) -> bool:
     return start <= minutes < end if start < end else minutes >= start or minutes < end
 
 
-def emit(lines: list[str], cfg: dict) -> None:
-    """通知を出す。静かな時間帯（quiet_hours）は溜めておき、明けたら 1 行にまとめて出す。"""
+def emit(lines: list[str], cfg: dict, records: list[str] = ()) -> None:
+    """通知を出す。静かな時間帯（quiet_hours）は溜めておき、明けたら 1 行にまとめて出す。
+    records（作業エージェント同士の伝言）は秘書への記録なので、デスクトップ通知は出さない。"""
     pending = home() / ".quiet-pending"
     if in_quiet_hours(cfg):
-        if lines:
+        if lines or records:
             with open(pending, "a") as f:
-                f.writelines(line + "\n" for line in lines)
+                f.writelines(line + "\n" for line in [*lines, *records])
         return
     if pending.exists():
         held = [l for l in pending.read_text().splitlines() if l]
@@ -1688,6 +1849,8 @@ def emit(lines: list[str], cfg: dict) -> None:
     for line in lines:
         print(line, flush=True)
         notify(line, cfg)
+    for line in records:
+        print(line, flush=True)
 
 
 def watch_alive() -> bool:
@@ -1757,8 +1920,17 @@ def main(argv=None) -> int:
     s.add_argument("--request", help="依頼内容。省略すると標準入力から読む")
     s.add_argument("--attach", action="append", default=[], metavar="FILE",
                    help="依頼に添える資料。タスクフォルダにコピーし、prompt.md にパスを書く（何度でも指定できる）")
+    s.add_argument("--space", help="タスクを置く herdr の space（ワークスペース）の名前。同じ名前の space があればそこにタブを足し、"
+                                   "なければ作る。関連するタスクは同じ space にする。省略するとそのタスクだけの space を作る")
     s.add_argument("--no-launch", action="store_true")
     s.set_defaults(func=cmd_new)
+
+    s = sub.add_parser("send")
+    s.add_argument("id")
+    s.add_argument("text")
+    s.set_defaults(func=cmd_send)
+
+    sub.add_parser("peers").set_defaults(func=cmd_peers)
 
     s = sub.add_parser("list")
     s.add_argument("--json", action="store_true")

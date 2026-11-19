@@ -46,15 +46,18 @@ expect "--name は英語で" "$out"
 [ ! -d "$SECRETARY_HOME/tasks/t001" ] || fail "英語でない名前でタスクを作った"
 
 # repos.md の名前で指定できる
-out=$($SEC new --repo myrepo --title "N+1 修正" --name "Fix Order_Query" --done "spec が通る" --request "N+1 を直す")
+out=$($SEC new --repo myrepo --title "N+1 修正" --name "Fix Order_Query" --space orders --done "spec が通る" --request "N+1 を直す")
 expect "t001 queued→running" "$out"
-$SEC new --repo "$REPO" --title "two" --done d --request r >/dev/null
+$SEC new --repo "$REPO" --title "two" --space orders --done d --request r >/dev/null
 out=$($SEC new --repo "$REPO" --title "三つ目" --done d --request r)
 expect "キュー待ち" "$out"
 LOG="$FAKE_HERDR_STATE.log"
-grep -q "\"tab\", \"create\", \"--cwd\", \"$REPO\"" "$LOG" || fail "リポジトリでタブを作っていない"
+# space がなければ作り、その最初のタブをタスクのタブにする。同じ space のタスクは同じワークスペースにタブを足す
+grep -q "\"workspace\", \"create\", \"--cwd\", \"$REPO\", \"--label\", \"orders\", \"--no-focus\"" "$LOG" || fail "space をリポジトリで作っていない"
+[ "$(grep -c '"workspace", "create"' "$LOG")" -eq 1 ] || fail "同じ space なのにワークスペースを 2 つ作った"
+grep -q "\"tab\", \"create\", \"--workspace\", \"w1\", \"--cwd\", \"$REPO\"" "$LOG" || fail "同じ space にタブを足していない"
 # タブには ID と、内容がわかる英語名（kebab-case）を出す。--name がなければ英語の題から作り、英語でない題なら ID だけ
-grep -q '"--label", "t001 fix-order-query"' "$LOG" || fail "タブ名に英語名が付いていない"
+grep -q '"tab", "rename", "w1:t1", "t001 fix-order-query"' "$LOG" || fail "タブ名に英語名が付いていない"
 grep -q '"--label", "t002 two"' "$LOG" || fail "英語の題からタブ名を作っていない"
 expect '"name": ""' "$(cat $SECRETARY_HOME/tasks/t003/meta.json)"
 grep -q '"--env", "SECRETARY_TASK_ID=t001"' "$LOG" || fail "タスク ID を環境変数で渡していない"
@@ -210,7 +213,9 @@ out=$(watch); expect "manual→review" "$out"
 expect "t001 \[review" "$($SEC inbox)"
 # review は並列数に数えないので、空いた枠で t003 が起動する
 expect "t003 queued→running" "$out"
-grep -q '"--label", "t003", ' "$LOG" || fail "英語でない題のタブ名が ID だけになっていない"
+# --space がなければ、そのタスクだけの space を作る
+grep -q '"workspace", "create", .*"--label", "t003", ' "$LOG" || fail "--space なしでタスクだけの space を作っていない"
+grep -q '"tab", "rename", "w2:t3", "t003"\]' "$LOG" || fail "英語でない題のタブ名が ID だけになっていない"
 
 # review 後の追加指示 → manual。古い result.md では review に戻らない
 hook t001 UserPromptSubmit ',"prompt":"テストも足して"'
@@ -230,7 +235,7 @@ sleep 1; echo "fixed" > $SECRETARY_HOME/tasks/t001/result.md
 hook t001 Stop
 out=$(watch); expect "running→review" "$out"
 
-# close するとタブも閉じる。作業場所は消さない
+# close するとタブも閉じる。同じ space にまだタスクがあれば space は残す。作業場所は消さない
 out=$($SEC close t001)
 expect "タブ w1:t1 を閉じました。作業場所（worktree）は残っています" "$out"
 grep -q '"tab", "close", "w1:t1"' "$LOG" || fail "close でタブを閉じていない"
@@ -268,7 +273,8 @@ out=$(watch); expect "t002 running→blocked 異常: ペインが見つからな
 
 # 起動時の確認（フォルダの信頼など）で止まったら知らせ、答えた後に最初の指示を送り直す
 echo t004 > "$FAKE_HERDR_STATE.not_ready"
-$SEC close t003 >/dev/null
+expect "space「t003」の最後のタスクだったので、space（w2）ごと閉じました" "$($SEC close t003)"
+grep -q '"workspace", "close", "w2"' "$LOG" || fail "space の最後のタスクを閉じても space を閉じていない"
 out=$($SEC new --repo myrepo --title four --name "Show descriptive English names on herdr tabs" --done d --request r)
 expect "t004 queued→blocked 起動時の確認待ち" "$out"
 grep -q '"--label", "t004 show-descriptive-english"' "$LOG" || fail "長い英語名を単語の切れ目で縮めていない"
@@ -430,7 +436,8 @@ git -C "$REPO" rev-parse -q --verify task/t001 >/dev/null || fail "ブランチ�
 expect "タブ $T4 を閉じる" "$($SEC cleanup t004 --keep-worktree)"
 grep -q "\"tab\", \"close\", \"$T4\"" "$LOG" && fail "--yes なしでタブを閉じた"
 $SEC cleanup t004 --yes --keep-worktree >/dev/null || fail "cleanup --yes でタブを閉じられない"
-grep -q "\"tab\", \"close\", \"$T4\"" "$LOG" || fail "cleanup でタブを閉じていない"
+W4=$(python3 -c "import json; print(json.load(open('$SECRETARY_HOME/tasks/t004/meta.json'))['workspace'])")
+grep -q "\"workspace\", \"close\", \"$W4\"" "$LOG" || fail "cleanup で space の最後のタブと space を閉じていない"
 # 未コミットの変更がある worktree は git worktree remove が断るので、消さずに知らせる
 git -C "$REPO" worktree add -q "$TMP/wt/fix-t003" -b fix-t003
 echo dirty > "$TMP/wt/fix-t003/a.txt"
@@ -492,6 +499,67 @@ expect "- \`$SECRETARY_HOME/tasks/t005/attachments/notion-page.md\`" "$(cat $SEC
 grep -q "依頼に添える資料" "$SECRETARY_HOME/tasks/t001/prompt.md" && fail "資料がないのに見出しを書いた"
 hook t005 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
 watch >/dev/null
+
+# 関連するタスクは同じ space に並べ、作業エージェント同士で伝言を送れる。伝言は秘書にも記録として届く
+python3 - <<PY
+import json; p="$SECRETARY_HOME/config.json"; c=json.load(open(p)); c["max_parallel"]=10; json.dump(c,open(p,"w"))
+PY
+$SEC close t002 >/dev/null
+meta() { python3 -c "import json; print(json.load(open('$SECRETARY_HOME/tasks/$1/meta.json')).get('$2'))"; }
+if $SEC new --repo myrepo --title x --space "  " --done d --request r 2>/dev/null; then fail "空の --space で登録できた"; fi
+expect "t006 queued→running" "$($SEC new --repo myrepo --title api --space "api change" --done d --request r)"
+expect "t007 queued→running" "$($SEC new --repo myrepo --title web --space "api change" --done d --request r)"
+for t in t006 t007; do hook $t UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'; done
+watch >/dev/null
+WS=$(meta t006 workspace)
+[ "$(meta t007 workspace)" = "$WS" ] || fail "同じ space のタスクが別のワークスペースにいる"
+[ "$(grep -c '"workspace", "create", .*"api change"' "$LOG")" -eq 1 ] || fail "同じ space を 2 つ作った"
+P6=$(cat "$SECRETARY_HOME/tasks/t006/prompt.md"); P7=$(cat "$SECRETARY_HOME/tasks/t007/prompt.md")
+expect "space「api change」" "$P7"
+expect "- t006: api（repo）" "$P7"
+expect "$SECRETARY_HOME/bin/sec send <タスク ID>" "$P7"
+expect "今はこのタスクだけ" "$P6"
+grep -q "同じ space のタスク" "$SECRETARY_HOME/tasks/t005/prompt.md" && fail "--space なしのタスクに space の案内を書いた"
+expect "space=api change" "$($SEC list)"
+# 作業エージェントは同じ space の今の一覧を見られる（後から加わったタスクも出る）
+expect "- t007: web" "$(SECRETARY_TASK_ID=t006 $SEC peers)"
+# 作業エージェントの許可リストに sec send / peers が入っている（確認待ちで止まらない）
+grep -q "Bash($SECRETARY_HOME/bin/sec send:\*)" "$SECRETARY_HOME/worker-settings.json" || fail "sec send を作業エージェントに許可していない"
+# 送り手が分からない・別の space・自分自身には送らない
+if out=$($SEC send t007 x 2>&1); then fail "作業エージェントのペインの外から送れた"; fi
+expect "作業エージェントのペインから" "$out"
+if out=$(SECRETARY_TASK_ID=t006 $SEC send t005 x 2>&1); then fail "別の space のタスクに送れた"; fi
+expect "同じ space「api change」で動いているタスクではありません" "$out"
+if SECRETARY_TASK_ID=t006 $SEC send t006 x 2>/dev/null; then fail "自分に送れた"; fi
+out=$(SECRETARY_TASK_ID=t006 $SEC send t007 "API は /v2 にした"); expect "t007 に送りました" "$out"
+grep -qE '"agent", "prompt", "t007-[0-9a-f]{6}", "\[secretary\] t006 からの伝言.*sec send t006.*: API は /v2 にした"' "$LOG" || fail "伝言を送っていない"
+out=$(watch); expect "\[secretary\] 伝言 t006→t007: API は /v2 にした" "$out"
+# 伝言は秘書からの入力と同じ扱いで、介入（manual）にはしない
+hook t007 UserPromptSubmit ',"prompt":"[secretary] t006 からの伝言: API は /v2 にした"'
+out=$(watch); [ -z "$out" ] || fail "伝言を介入扱いした: $out"
+expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t007/meta.json)"
+# 入力待ちの相手に伝言が届いたら作業に戻る
+hook t007 Stop; watch >/dev/null
+SECRETARY_TASK_ID=t006 $SEC send t007 "マージしたよ" >/dev/null
+expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t007/meta.json)"
+# 人間が相手の入力欄に打ちかけていたら送らない
+screen "ちょっと待って"
+if out=$(SECRETARY_TASK_ID=t006 $SEC send t007 "x" 2>&1); then fail "人間の入力中に伝言を送った"; fi
+expect "人間が打ちかけ" "$out"
+rm "$FAKE_HERDR_STATE.screen"
+watch >/dev/null
+# space の最後のタスクを閉じたら space も閉じる
+expect "タブ $(meta t006 tab) を閉じました" "$($SEC close t006)"
+grep -q "\"workspace\", \"close\", \"$WS\"" "$LOG" && fail "まだタスクがいる space を閉じた"
+expect "space「api change」の最後のタスクだったので" "$($SEC close t007)"
+grep -q "\"workspace\", \"close\", \"$WS\"" "$LOG" || fail "space の最後のタスクを閉じても space を閉じていない"
+# すでにある同じ名前のワークスペースにはタブを足す。人間が足したタブがあれば、最後のタスクを閉じても space は残す
+HW=$($HERDR_BIN workspace create --label shared --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['workspace']['workspace_id'])")
+expect "t008 queued→running" "$($SEC new --repo myrepo --title shared --space shared --done d --request r)"
+hook t008 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
+[ "$(meta t008 workspace)" = "$HW" ] || fail "同じ名前のワークスペースにタブを足していない"
+expect "タブ $(meta t008 tab) を閉じました" "$($SEC close t008)"
+grep -q "\"workspace\", \"close\", \"$HW\"" "$LOG" && fail "人間のタブが残る space を閉じた"
 
 # 静かな時間帯（既定 18:00〜09:00）は通知を出さず、明けたら溜まった変化を 1 行にまとめて出す
 python3 - "$HERE/../scripts" <<'PY'
