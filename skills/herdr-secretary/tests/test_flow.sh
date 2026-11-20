@@ -25,6 +25,7 @@ PY
 echo "- myrepo: $REPO — テスト用（worktrees: ../wt）" >> "$SECRETARY_HOME/repos.md"
 
 # 完了条件なしは拒否
+# R1: SKILL.md の「ルールと、それを守らせているもの」
 if $SEC new --repo "$REPO" --title x --request y 2>/dev/null; then fail "done なしで登録できた"; fi
 
 # herdr が古い・サーバーと protocol が合わないときは登録せず、人間がやることを示す
@@ -123,7 +124,7 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"どちら
 hook t001 Stop ",\"transcript_path\":\"$TR\""
 out=$(watch); expect "running→blocked 入力待ち" "$out"
 
-# 人間が入力欄に打ちかけているときは、秘書から送らない（混ざるため）。空の入力欄の入力例は人間の文字ではない
+# R3: 人間が入力欄に打ちかけているときは、秘書から送らない（混ざるため）。空の入力欄の入力例は人間の文字ではない
 screen() { # screen TEXT: 入力欄に TEXT が入った画面にする
   printf '❯ [secretary] prompt.md を読んで\n\n⏺ 作業しました\n\n%s\n❯ %s\n%s\n  ⏵⏵ accept edits on\n' \
     "──────────────────────" "$1" "──────────────────────" > "$FAKE_HERDR_STATE.screen"
@@ -194,13 +195,13 @@ expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t001/meta.json)"
 hook t001 Stop
 out=$(watch); expect "running→blocked 入力待ち" "$out"
 
-# ダイアログ中は文字で答えられないので、ペインに誘導する
+# R7: ダイアログ中は文字で答えられないので、ペインに誘導する
 echo t001 > "$FAKE_HERDR_STATE.blocked"
 if out=$($SEC reply t001 "yes" 2>&1); then fail "ダイアログ中に送れてしまった"; fi
 expect "ペイン w1:p1 で直接答えてください" "$out"
 rm "$FAKE_HERDR_STATE.blocked"
 
-# 人間が直接指示 → manual。manual 中の Stop / Notification は黙る
+# R12: 人間が直接指示 → manual。manual 中の Stop / Notification は黙る
 hook t001 UserPromptSubmit ',"prompt":"いや、別の方法で"'
 out=$(watch); expect "blocked→manual" "$out"
 hook t001 Stop; hook t001 Notification ',"message":"Claude needs your permission"'
@@ -307,7 +308,7 @@ out=$(watch); expect "t004 running→blocked 最初の指示が入力欄に残�
 $SEC retry t004 >/dev/null
 [ "$(grep -cE '"agent", "prompt", "t004-' "$LOG")" -eq "$prompts" ] || fail "入力欄に残っているのに指示を打ち直した"
 tail -1 "$LOG" | grep -qE '"agent", "send-keys", "t004-[0-9a-f]{6}", "enter"\]' || fail "retry で Enter を送っていない"
-# 人間が入力欄に打ちかけていたら retry しない
+# R3: 人間が入力欄に打ちかけていたら retry しない
 screen "ちょっと待って"
 if out=$($SEC retry t004 2>&1); then fail "人間の入力中に retry した"; fi
 expect "人間に送るか消してもらってから" "$out"
@@ -349,7 +350,7 @@ expect "Bash(git worktree:\*)" "$($SEC permissions)"
 $SEC allow "Bash(git worktree:*)" >/dev/null
 grep -q 'Bash(git worktree:\*)' "$SECRETARY_HOME/worker-settings.json" || fail "allow が書かれていない"
 expect "Bash(git worktree:\*).*許可済みなのに止まった" "$($SEC permissions)"
-# 許可ダイアログも番号付きだが、秘書が choose で許可してはいけない
+# R2: 許可ダイアログも番号付きだが、秘書が choose で許可してはいけない
 keys=$(grep -c '"send-keys", "t004' "$LOG")
 if $SEC choose t004 1 2>/dev/null; then fail "許可ダイアログを choose で選べた"; fi
 [ "$(grep -c '"send-keys", "t004' "$LOG")" -eq "$keys" ] || fail "許可ダイアログにキーを送った"
@@ -394,7 +395,7 @@ watch >/dev/null
 
 # peek は agent read で直近の画面を読む
 expect "(screen of t004-" "$($SEC peek t004)"
-# peek は 60 行で打ち切る
+# R5: peek は 60 行で打ち切る
 expect "60 行までです" "$($SEC peek t004 --lines 500 2>&1 >/dev/null)"
 
 # hook が届かないと running のまま時間だけが過ぎる。判定の前に herdr の agent_status を見て補正する
@@ -431,6 +432,7 @@ expect "worktree $SECRETARY_HOME/worktrees/t001（ブランチ task/t001 は残�
 echo "$out" | grep -q "other" && fail "関係ない worktree を候補にした: $out"
 expect "人間の確認を取ってから" "$out"
 [ -d "$SECRETARY_HOME/worktrees/t001" ] || fail "--yes なしで消した"
+# R11: SKILL.md の「ルールと、それを守らせているもの」
 if $SEC cleanup t001 --yes --keep-worktree 2>/dev/null; then fail "見せた内容と違うのに cleanup --yes が通った"; fi
 $SEC cleanup t001 --yes >/dev/null || fail "cleanup --yes が失敗"
 [ ! -d "$SECRETARY_HOME/worktrees/t001" ] || fail "worktree が消えていない"
@@ -445,6 +447,7 @@ grep -q "\"workspace\", \"close\", \"$W4\"" "$LOG" || fail "cleanup で space �
 git -C "$REPO" worktree add -q "$TMP/wt/fix-t003" -b fix-t003
 echo dirty > "$TMP/wt/fix-t003/a.txt"
 expect "未コミットの変更あり" "$($SEC cleanup t003 --keep-tab)"
+# R4: SKILL.md の「ルールと、それを守らせているもの」
 if $SEC cleanup t003 --yes --keep-tab 2>/dev/null; then fail "変更のある worktree の片付けが成功扱い"; fi
 [ -f "$TMP/wt/fix-t003/a.txt" ] || fail "変更のある worktree を消した"
 
@@ -545,7 +548,7 @@ expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t007/meta.json)"
 hook t007 Stop; watch >/dev/null
 SECRETARY_TASK_ID=t006 $SEC send t007 "マージしたよ" >/dev/null
 expect '"status": "running"' "$(cat $SECRETARY_HOME/tasks/t007/meta.json)"
-# 人間が相手の入力欄に打ちかけていたら送らない
+# R3: 人間が相手の入力欄に打ちかけていたら送らない
 screen "ちょっと待って"
 if out=$(SECRETARY_TASK_ID=t006 $SEC send t007 "x" 2>&1); then fail "人間の入力中に伝言を送った"; fi
 expect "人間が打ちかけ" "$out"
@@ -563,6 +566,34 @@ hook t008 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
 [ "$(meta t008 workspace)" = "$HW" ] || fail "同じ名前のワークスペースにタブを足していない"
 expect "タブ $(meta t008 tab) を閉じました" "$($SEC close t008)"
 grep -q "\"workspace\", \"close\", \"$HW\"" "$LOG" && fail "人間のタブが残る space を閉じた"
+
+# 迷って別の space で起動したタスクは、あとから sec move で関連するタスクの space に移せる。中の Claude Code は止めない
+expect "t009 queued→running" "$($SEC new --repo myrepo --title api --space orders-v2 --done d --request r)"
+expect "t010 queued→running" "$($SEC new --repo myrepo --title web --done d --request r)"
+for t in t009 t010; do hook $t UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'; done
+W9=$(meta t009 workspace); W10=$(meta t010 workspace); P10=$(meta t010 pane)
+STARTS=$(grep -c '"agent", "start", "t010-' "$LOG")
+if $SEC move t010 --space "  " 2>/dev/null; then fail "空の --space で移した"; fi
+out=$($SEC move t010 --space orders-v2)
+expect "t010 を space「t010 web」から「orders-v2」に移しました（同じ space: t009）" "$out"
+[ "$(meta t010 workspace)" = "$W9" ] || fail "移した先のワークスペースが違う"
+[ "$(meta t010 space)" = "orders-v2" ] || fail "space を書き換えていない"
+[ "$(meta t010 pane)" != "$P10" ] || fail "移したあとのペイン ID を記録していない"
+grep -q "\"pane\", \"move\", \"$P10\", \"--new-tab\", \"--workspace\", \"$W9\"" "$LOG" || fail "pane move を呼んでいない"
+[ "$(grep -c '"agent", "start", "t010-' "$LOG")" = "$STARTS" ] || fail "移すときに Claude Code を起動し直した"
+$HERDR_BIN workspace list | grep -q "\"$W10\"" && fail "空になった元の space が残っている"
+expect "- t010: web" "$(SECRETARY_TASK_ID=t009 $SEC peers)"
+# 中のプロセスの HERDR_PANE_ID は元の ID のまま。hook はそこからもタスクを引ける
+echo '{"hook_event_name":"Stop"}' | env -u SECRETARY_TASK_ID HERDR_PANE_ID="$P10" $SEC hook
+watch >/dev/null
+expect '"status": "blocked"' "$(cat $SECRETARY_HOME/tasks/t010/meta.json)"
+# まだない space に移すと、その名前で space を作る
+out=$($SEC move t010 --space solo)
+expect "「orders-v2」から「solo」に移しました（同じ space: ほかのタスクなし）" "$out"
+grep -q '"pane", "move", ".*", "--new-workspace", "--label", "solo", "--tab-label", "t010 web"' "$LOG" || fail "space を作って移していない"
+expect "もう space「solo」にあります" "$($SEC move t010 --space solo)"
+$SEC close t009 >/dev/null; $SEC close t010 >/dev/null
+if $SEC move t010 --space x 2>/dev/null; then fail "閉じたタスクを移した"; fi
 
 # 静かな時間帯（既定 18:00〜09:00）は通知を出さず、明けたら溜まった変化を 1 行にまとめて出す
 python3 - "$HERE/../scripts" <<'PY'

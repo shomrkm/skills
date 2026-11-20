@@ -126,6 +126,40 @@ if (group, cmd) == ("tab", "rename"):
         err("tab_not_found", args[2])
     ok("tab_renamed", tab={"tab_id": args[2], "label": " ".join(args[3:])})
 
+if (group, cmd) == ("pane", "move"):
+    assert "--no-focus" in args, "フォーカスを奪ってはいけない"
+    pane = args[2]
+    src_tab = next((t for t, p in tabs.items() if p == pane), None)
+    if src_tab is None:
+        err("pane_not_found", pane)
+    src_ws = src_tab.split(":")[0]
+    created = None
+    if "--new-workspace" in args:
+        state["wn"] = state.get("wn", 0) + 1
+        ws = f"w{state['wn']}"
+        workspaces[ws] = flag("--label", ws)
+        created = {"workspace_id": ws, "label": workspaces[ws]}
+    else:
+        ws = flag("--workspace")
+        if ws not in workspaces:
+            err("workspace_not_found", f"workspace {ws} not found")
+    del tabs[src_tab]
+    state["n"] += 1
+    new_pane, new_tab_id = f"{ws}:p{state['n']}", f"{ws}:t{state['n']}"
+    tabs[new_tab_id] = new_pane
+    state["panes"] = [new_pane if p == pane else p for p in state["panes"]]
+    state["agents"] = {n: (new_pane if p == pane else p) for n, p in state["agents"].items()}
+    if src_ws != ws and not any(t.startswith(f"{src_ws}:") for t in tabs):
+        del workspaces[src_ws]
+    save()
+    result = {"changed": True, "previous_pane_id": pane, "previous_workspace_id": src_ws, "previous_tab_id": src_tab,
+              "pane": {"pane_id": new_pane, "terminal_id": "t", "workspace_id": ws, "tab_id": new_tab_id,
+                       "focused": False, "agent_status": "working"},
+              "target_layout": {}}
+    if created:
+        result["created_workspace"] = created
+    ok("pane_move", move_result=result)
+
 if (group, cmd) == ("agent", "list"):
     ok("agent_list", agents=[{"name": n, "pane_id": p, "agent": "claude",
                               "agent_status": state.get("status", {}).get(n, "working")}

@@ -55,6 +55,7 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 | space を探す | `herdr workspace list`（同じ space の閉じていないタスクがいるワークスペース、なければ `label` が space 名のもの） |
 | space にタブを足す（フォーカスは移さない） | `herdr tab create --workspace <ws> --cwd <repo> --label <id 名前> --no-focus --env SECRETARY_TASK_ID=<id> --env SECRETARY_HOME=<home>` → `.result.root_pane.pane_id` |
 | space を作る（space がなかったとき） | `herdr workspace create --cwd <repo> --label <space> --no-focus --env ...` → `.result.workspace` / `.result.tab` / `.result.root_pane`。最初のタブをそのタスクのタブにし、`herdr tab rename <tab> <id 名前>` |
+| タスクを別の space に移す（`sec move`） | 移す先の space があれば `herdr pane move <pane> --new-tab --workspace <ws> --label <id 名前> --no-focus`、なければ `herdr pane move <pane> --new-workspace --label <space> --tab-label <id 名前> --no-focus` → `.result.move_result.pane`。別のワークスペースに移すとペイン ID が変わるので、元の ID を meta.json の `pane_aliases` に残す。中のプロセスの `HERDR_PANE_ID` は元の ID のままなので、hook はそこからもタスクを引く |
 | 伝言を送る（`sec send`） | `herdr agent prompt <宛先の agent> "[secretary] <送り手 ID> からの伝言 ..."` |
 | Claude Code を起動 | `herdr agent start <agent> --kind claude --pane <pane> --timeout 60000 -- --settings <worker-settings.json>` |
 | 最初の指示・`sec reply` | `herdr agent prompt <agent> "[secretary] ..."` |
