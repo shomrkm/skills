@@ -560,12 +560,47 @@ def home_tag() -> str:
 INPUT_PROMPT_CHARS = ("❯", ">")
 # 空の入力欄に薄く出る入力例。人間が打った文字ではない
 INPUT_PLACEHOLDER_RE = re.compile(r'^Try "[^"]*"$')
+ANSI_RE = re.compile(r"\x1b\[([0-9;:]*)([A-Za-z])")
+SGR_DIM, SGR_NORMAL_INTENSITY = 2, 22
+SGR_EXTENDED_COLORS = (38, 48, 58)
+
+
+def sgr_dim(params: str, dim: bool) -> bool:
+    """SGR の引数を読んで、薄い文字の状態を更新する。38;2;R;G;B のような色の値の 2 は薄い文字の指定ではない。"""
+    codes = [int(c) if c else 0 for c in re.split("[;:]", params)] if params else [0]
+    i = 0
+    while i < len(codes):
+        c = codes[i]
+        if c in SGR_EXTENDED_COLORS:
+            i += {5: 3, 2: 5}.get(codes[i + 1] if i + 1 < len(codes) else -1, 1)
+            continue
+        if c in (0, SGR_NORMAL_INTENSITY):
+            dim = False
+        elif c == SGR_DIM:
+            dim = True
+        i += 1
+    return dim
+
+
+def typed_text(line: str) -> str:
+    """ANSI 付きの 1 行から、エスケープと薄い文字を除いた文字を返す。
+    Claude Code は入力欄の入力候補を薄い文字で出すので、薄い文字は人間が打った文字ではない。"""
+    out, dim, pos = [], False, 0
+    for m in ANSI_RE.finditer(line):
+        if not dim:
+            out.append(line[pos:m.start()])
+        pos = m.end()
+        if m.group(2) == "m":
+            dim = sgr_dim(m.group(1), dim)
+    if not dim:
+        out.append(line[pos:])
+    return "".join(out)
 
 
 def input_box(screen: str) -> str | None:
     """画面から Claude Code の入力欄の中身を取り出す。入力欄は `─` の罫線 2 本に挟まれた `❯` で始まる行で、
     会話の履歴に出る `❯` の行（送信済みの指示）とは罫線で見分ける。入力欄がなければ None。"""
-    lines = screen.splitlines()
+    lines = [typed_text(l) for l in screen.splitlines()]
     borders = [i for i, l in enumerate(lines) if len(l.strip()) >= 10 and set(l.strip()) <= {"─", "━"}]
     for top, bottom in reversed(list(zip(borders, borders[1:]))):
         body = lines[top + 1:bottom]
@@ -669,7 +704,7 @@ class Herdr:
 
     def input_text(self, agent: str) -> str | None:
         """Claude Code の入力欄に入っている文字。入力欄が見えない（起動画面やダイアログ）なら None。"""
-        r = self._run("agent", "read", agent, "--source", "visible", "--lines", "60")
+        r = self._run("agent", "read", agent, "--source", "visible", "--lines", "60", "--format", "ansi")
         return input_box(r.get("read", {}).get("text") or r.get("text") or "")
 
     def close_tab(self, tab: str) -> None:
