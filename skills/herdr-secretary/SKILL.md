@@ -99,14 +99,7 @@ herdr の版やサーバーの問題で登録できなかったときは、`sec 
   - 状況を箇条書き
 ```
 
-- `{status}` は sec の状態を 3 つに読み替える
-
-  | sec の状態 | `{status}` |
-  |---|---|
-  | `running`、`queued` | `in-progress` |
-  | `blocked`、`review`、`manual` | `waiting` |
-  | `closed` | `completed` |
-
+- `{status}` には sec の状態をそのまま書く。`running`、`queued`、`blocked`、`review`、`manual`、`closed` のどれかだ
 - `{タスクのサマリ}` は必ず付ける。tXX だけでは何のタスクかわからない。`sec list` の題を使い、題で伝わらなければ依頼内容から一言で書く
 - 状況の箇条書きには、何を待っているかと、いまの進み具合を書く。許可待ちならコマンドを、入力待ちなら聞かれている質問を書く
 - 関連するドキュメントや、人間のレビュー待ちのドキュメントがあれば、状況の箇条書きに URL を貼る。PR、Artifact、Notion ページがこれにあたる
@@ -115,13 +108,13 @@ herdr の版やサーバーの問題で登録できなかったときは、`sec 
 例:
 
 ```markdown
-- [waiting] t021: 注文 API の N+1 クエリを直す
+- [blocked] t021: 注文 API の N+1 クエリを直す
   - 許可待ち: `bundle exec rspec spec/requests/orders_spec.rb`
   - PR: https://github.com/example/order-api/pull/123
 
 　
 
-- [in-progress] t023: herdr-secretary の状況報告の書式を決める
+- [running] t023: herdr-secretary の状況報告の書式を決める
   - SKILL.md の報告箇所を書き換えている
 ```
 
@@ -162,7 +155,7 @@ herdr の版やサーバーの問題で登録できなかったときは、`sec 
 ## 「今どうなってる？」と聞かれたとき
 
 1. `sec list` で閉じていないタスクを見る
-2. 全タスクを [報告の書式](#報告の書式) で返す。先に waiting を `sec inbox` の順に並べる。`sec inbox` は待たせている時間が長い順だ。続けて in-progress を並べる
+2. 全タスクを [報告の書式](#報告の書式) で返す。先に blocked と review を `sec inbox` の順に並べる。`sec inbox` は待たせている時間が長い順だ。残りは `sec list` の順に並べる
 
 ## 人間が判断したあと
 
