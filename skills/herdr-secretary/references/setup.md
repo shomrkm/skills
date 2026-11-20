@@ -5,7 +5,7 @@
 - **herdr 0.9.5 以上**。0.7.3 では `agent start` に `--kind` / `--pane` がなく、`unknown option: --kind` で起動に失敗する
 - herdr を上げたら、**サーバーも再起動する**。古いサーバーが動いたままだと、クライアントとの protocol が合わずに `protocol_mismatch` で失敗する。サーバーを止めるとすべてのペインのプロセスが止まるので、作業を区切ってから `herdr server stop` し、`herdr` で起動し直す
 
-`sec init` と `sec new` は、先に `herdr --version` と `herdr status --json` を見て、足りなければ何をすればいいかを出す（`sec new` は登録せずに終了コード 3 で終わる）。いつでも `sec doctor` で確かめられる。
+`sec init` と `sec new` は、先に `herdr --version` と `herdr status --json` を見て、足りなければ何をすればいいかを出す。このとき `sec new` は登録せずに、終了コード 3 で終わる。いつでも `sec doctor` で確かめられる。
 
 ## 1. 初期化
 
@@ -13,7 +13,7 @@
 python3 <このリポジトリ>/skills/herdr-secretary/scripts/secretary.py init
 ```
 
-`~/secretary/`（`$SECRETARY_HOME` で変更できる）に次のものができる。
+`~/secretary/` に次のものができる。場所は `$SECRETARY_HOME` で変えられる。
 
 | ファイル | 中身 |
 |---|---|
@@ -28,15 +28,15 @@ python3 <このリポジトリ>/skills/herdr-secretary/scripts/secretary.py init
 
 `repos.md` は `- 名前: 絶対パス — 説明` の形で書く。名前を書いておくと `sec new --repo 名前` で指定できる。
 
-`worker-settings.json` は作業エージェントの起動時に `--settings` で渡す。普段使っている Claude Code の設定には触らない。`init` はやり直してもよい（hook の向き先が変わったときなど）。`sec allow` で足した許可リストは残る。
+`worker-settings.json` は作業エージェントの起動時に `--settings` で渡す。普段使っている Claude Code の設定には触らない。hook の向き先が変わったときなどは、`init` をやり直してよい。`sec allow` で足した許可リストは残る。
 
 `.claude/` 配下の Edit / Write は Claude Code の保護パスで、`allow` や `acceptEdits` があっても確認される。PreToolUse hook の `permissionDecision: "allow"` でも確認は消えない。PermissionRequest hook が `decision.behavior: "allow"` を返したときだけ確認なしで通るので、作業エージェントの hook（`sec hook`）は、タスクの worktree の置き場（`worktrees/`、repos.md の `（worktrees: ...）`、`<repo>/.claude/worktrees/`）の中の `.claude/skills/`・`.claude/commands/`・`.claude/agents/` への Edit / Write だけを許可する。`.claude/settings.json` など、作業エージェントが自分の権限を広げられるものは許可しない。
 
 ### スキルの更新を反映する
 
-hook は `init` を実行したリポジトリ（このリポジトリ）の `scripts/secretary.py` を直接読む。PR をマージしただけでは手元のファイルは変わらないので、**マージしたら手元で `git pull` する**。pull すれば、動いている作業エージェントの hook にもすぐ効く。監視ループ（`sec follow` が裏で起動する `sec watch`）は起動したときのコードで動き続けるので、pull したら `kill $(cat ~/secretary/.watch.pid)` で止める。動いている `sec follow` が 10 秒ほどで新しいコードで起動し直す。
+hook は、`init` を実行したこのリポジトリの `scripts/secretary.py` を直接読む。PR をマージしただけでは手元のファイルは変わらないので、**マージしたら手元で `git pull` する**。pull すれば、動いている作業エージェントの hook にもすぐ効く。監視ループの `sec watch` は、`sec follow` が裏で起動し、起動したときのコードで動き続ける。そのため、pull したら `kill $(cat ~/secretary/.watch.pid)` で止める。動いている `sec follow` が 10 秒ほどで新しいコードで起動し直す。
 
-監視ループは秘書のセッションから切り離して動き、秘書を終えても止まらない。止めたいときも `kill $(cat ~/secretary/.watch.pid)` する（`sec follow` が動いていれば起動し直されるので、先に秘書のセッションを終える）。出力は `~/secretary/watch.log`、エラーは `~/secretary/watch.err` に残る。
+監視ループは秘書のセッションから切り離して動き、秘書を終えても止まらない。止めたいときも `kill $(cat ~/secretary/.watch.pid)` する。`sec follow` が動いていれば起動し直されるので、先に秘書のセッションを終える。出力は `~/secretary/watch.log`、エラーは `~/secretary/watch.err` に残る。
 
 `sec watch` は起動時に upstream を fetch し、手元が遅れていれば `[secretary] スキルのリポジトリ（...）が upstream より N コミット遅れています` と知らせる。hook が別の場所のスクリプトを呼んでいるときも知らせる。`sec doctor` でも同じことを確かめられる。止めたいときは config.json の `update_check` を `false` にする。
 
@@ -64,7 +64,7 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 | タブを閉じる（`sec close` / `sec cleanup`） | `herdr tab close <tab>`。space に残るのがそのタブだけで、同じ space に閉じていないタスクもなければ `herdr workspace close <ws>`（`herdr tab list --workspace <ws>` で確かめる） |
 | 版とサーバーの確認（`sec doctor`） | `herdr --version` / `herdr status --json`（`server.compatible`、`restart_needed`） |
 
-hook が届かないと（スクリプトが古い、hook の向き先が違う、など）、許可待ちや作業の終了に気づけず、running のまま「30 分イベントなし」「コマンドが 120 分終わらない」に見える。そこで、無反応と判定する前に `herdr agent list` の `agent_status` を見る。`working` なら判定しない。`blocked` なら「許可待ちか選択待ち」、`idle` / `done` なら「入力待ち」（result.md があれば review）として、`hook が届いていない可能性` を添えて知らせる。この判定は snapshot（`snapshot_interval_sec` ごと）の周にだけ行う。
+hook が届かないと（スクリプトが古い、hook の向き先が違う、など）、許可待ちや作業の終了に気づけず、running のまま「30 分イベントなし」「コマンドが 120 分終わらない」に見える。そこで、無反応と判定する前に `herdr agent list` の `agent_status` を見る。`working` なら判定しない。`blocked` なら「許可待ちか選択待ち」、`idle` / `done` なら「入力待ち」（result.md があれば review）として、`hook が届いていない可能性` を添えて知らせる。この判定は、`snapshot_interval_sec` ごとに回る snapshot の周にだけする。
 
 `sec choose` は、直前のツールが AskUserQuestion で、herdr から見て `blocked` のときだけ動く。許可ダイアログも番号付きの選択肢なので、取り違えて秘書が許可しないようにしている。
 
@@ -74,13 +74,13 @@ hook はどのタスクのイベントかを `SECRETARY_TASK_ID` で知る。た
 
 herdr のエラーは次のように扱う。
 
-- `agent_pane_busy`：作ったばかりのタブでシェルの準備がまだできていない。数秒だけ再試行する
-- `agent_not_ready`：起動時の確認（フォルダを信頼するか、など）で止まっている。blocked として知らせる。人間がペインで答えたら `sec retry` で最初の指示を送り直す
-- `workspace_not_found`：space のワークスペースが一覧を取った後に閉じられた。space を作り直してそこにタブを置く
+- `agent_pane_busy` は、作ったばかりのタブでシェルの準備がまだできていない。数秒だけ再試行する
+- `agent_not_ready` は、フォルダを信頼するかなどの、起動時の確認で止まっている。blocked として知らせる。人間がペインで答えたら `sec retry` で最初の指示を送り直す
+- `workspace_not_found` は、space のワークスペースが一覧を取った後に閉じられた。space を作り直してそこにタブを置く
 
 herdr は Claude Code の起動直後の画面（初回の案内など）を「入力待ち」と判定することがある。その場合、最初の指示はその画面に吸い込まれる。そのため、最初の指示が hook（UserPromptSubmit）で届いたことを 30 秒以内に確認できなければ、blocked として知らせる。Enter を自動で送り直すことはしない（フォルダの信頼確認は、既定の選択肢が「No, exit」）。
-- `agent_blocked`：許可や選択肢のダイアログが出ている。`sec reply` は送らない。選択式の質問なら `sec choose`、許可ダイアログならペインで答えるよう案内する
-- `protocol_mismatch`：herdr を上げたあと、サーバーが古いまま。サーバーの再起動が要る（0. を参照）
+- `agent_blocked` は、許可や選択肢のダイアログが出ている。`sec reply` は送らない。選択式の質問なら `sec choose`、許可ダイアログならペインで答えるよう案内する
+- `protocol_mismatch` は、herdr を上げたあとも、サーバーが古いままになっている。サーバーの再起動が要る。0. を参照する
 
 UserPromptSubmit が来たら、prompt の先頭で送り手を見分ける。`[secretary]` は秘書、`<task-notification>` は Claude Code 自身（バックグラウンドのサブエージェントやコマンドの完了通知）、それ以外は人間の直接指示として manual にする。許可ダイアログや選択式の質問（AskUserQuestion）にペインで答えても UserPromptSubmit は来ない（PostToolUse で running に戻る）。
 
@@ -104,24 +104,24 @@ sh skills/herdr-secretary/tests/test_real_hooks.sh
 
 herdr をソースからビルドし、ヘッドレスのサーバーを立てて、本物の作業エージェントでタスクを流した。
 
-- 1 件：起動 → 起動画面での停止の検知 → retry → 許可待ちの通知（コマンド付き）→ ダイアログ中の `sec reply` はペインへ案内 → 許可 → worktree で作業 → result.md → review
-- 直接介入：review 後にペインで追加の指示 → manual → result.md が書き直されて review
-- 3 件の並列（各 1 ファイル作成、ルールのない小さなリポジトリ）：
+- 1 件の流れ。起動し、起動画面での停止を検知し、retry した。コマンド付きの許可待ちが通知され、ダイアログ中の `sec reply` はペインへ案内された。許可したあと、作業エージェントが worktree で作業し、result.md を書いて review になった
+- 直接介入。review のあとにペインで追加の指示を出すと manual になり、result.md が書き直されて review に戻った
+- 3 件の並列。ルールのない小さなリポジトリで、各タスクが 1 ファイルを作る。結果は次のとおり:
 
 | 条件 | 3 件すべて review まで | 人間の対応 |
 |---|---|---|
 | 最初の版 | 69 秒 | 許可 6 回 |
 | 既定の作業場所を許可（`worktrees/`） | 45 秒 | 許可 6 回 |
-| さらに「Bash は 1 コマンドずつ」を指示 | 39 秒 | 0 回 |
+| 前の行の設定のまま、「Bash は 1 コマンドずつ」とも指示 | 39 秒 | 0 回 |
 
-- 3 件の並列（実務に近い TypeScript リポジトリ。CLAUDE.md に「`../<repo>-worktrees/<branch>` に worktree、`npm ci`、テストを書く、`npm test` と `typecheck` を通す、Conventional Commits」のルールあり。機能追加 2 件とバグ修正 1 件）：
+- 3 件の並列。実務に近い TypeScript リポジトリで、機能追加 2 件とバグ修正 1 件を流した。CLAUDE.md には、`../<repo>-worktrees/<branch>` に worktree を作る、`npm ci` する、テストを書く、`npm test` と `typecheck` を通す、Conventional Commits で書く、というルールがある。結果は次のとおり:
 
 | 条件 | 結果 | 人間の対応 |
 |---|---|---|
 | repos.md に worktree の場所を書かず、許可リストは読み取り系だけ | 47 秒で許可 13 回。その後、全件がリポジトリ外の worktree での Edit 確認で止まった（秘書は「3 件 blocked、19 分待ち」と出し続けた） | 許可 13 回以上 |
 | repos.md に `（worktrees: ../eval-app-worktrees）`、`sec permissions` の候補から `git add` / `git commit` / `npm ci` / `npm test` / `npm run` などを `sec allow` | 125 秒で 3 件とも review。全件ルールどおりのブランチにコミットされ、`npm test` と `typecheck` が通ることを別途確認 | **許可 0 回**。判断 3 回（既存の typecheck の不具合をどう直すか。3 件とも同じ質問）を `sec reply` で回答 |
 
-- 2 件の並列 × 3 回（Rails 7.2 API + RSpec + SQLite。CLAUDE.md に worktree の場所、`bundle install`、`bin/rails db:prepare`、`bundle exec rspec`、Conventional Commits のルールあり。バリデーション・API 追加など）：
+- 2 件の並列を 3 回。Rails 7.2 の API と RSpec と SQLite のリポジトリで、バリデーションや API の追加などを流した。CLAUDE.md には、worktree の場所、`bundle install`、`bin/rails db:prepare`、`bundle exec rspec`、Conventional Commits のルールがある。結果は次のとおり:
 
 | 回 | 許可リスト | 2 件すべて review まで | 人間の許可 |
 |---|---|---|---|
