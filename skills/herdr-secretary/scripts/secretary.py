@@ -733,6 +733,16 @@ class Herdr:
                 time.sleep(0.5)
         return pane
 
+    def move_pane(self, pane: str, label: str, workspace: str | None, space: str) -> dict:
+        """動いているペインを、プロセスを止めずに別の space の新しいタブへ移す（herdr pane move）。
+        workspace がなければ space の名前でワークスペースを作る。移したあとのペイン情報を返す。
+        別のワークスペースに移すとペイン ID が変わる。エージェント名はターミナルに付いてくる。"""
+        if workspace:
+            r = self._run("pane", "move", pane, "--new-tab", "--workspace", workspace, "--label", label, "--no-focus")
+        else:
+            r = self._run("pane", "move", pane, "--new-workspace", "--label", space, "--tab-label", label, "--no-focus")
+        return r["move_result"]["pane"]
+
     def prompt(self, agent: str, text: str) -> None:
         self._run("agent", "prompt", agent, text)
 
@@ -1397,6 +1407,44 @@ def cmd_retry(args) -> int:
     return 0
 
 
+def cmd_move(args) -> int:
+    """動いているタスクを別の space に移す。中の Claude Code は止めない。"""
+    space = " ".join(args.space.split())
+    if not space:
+        print("--space が空です。移す先の space の名前を付けてください。", file=sys.stderr)
+        return 2
+    herdr = Herdr(load_config())
+    with locked():
+        meta = read_meta(args.id)
+        if meta["status"] == CLOSED or not meta.get("pane"):
+            print(f"{args.id} は動いていません（{meta['status']}）。動いているタスクだけを移せます。", file=sys.stderr)
+            return 1
+        old_space = task_space(meta)
+        if old_space == space:
+            print(f"{args.id} はもう space「{space}」にあります。")
+            return 0
+        if meta["pane"] not in herdr.pane_ids():
+            print(f"{args.id} のペイン {meta['pane']} が見つかりません。", file=sys.stderr)
+            return 1
+        target = dict(meta, space=space)
+        workspace = herdr.space_workspace(target)
+        try:
+            pane = herdr.move_pane(meta["pane"], tab_label(meta), workspace, space)
+        except HerdrError as e:
+            print(f"移せませんでした（{e}）。", file=sys.stderr)
+            return 1
+        if pane["pane_id"] != meta["pane"]:
+            meta.setdefault("pane_aliases", []).append(meta["pane"])
+        meta.update(space=space, pane=pane["pane_id"], tab=pane.get("tab_id"),
+                    workspace=pane.get("workspace_id"))
+        write_meta(meta)
+    peers = space_peers(args.id, space)
+    note = "、".join(m["id"] for m in peers) or "ほかのタスクなし"
+    print(f"{args.id} を space「{old_space}」から「{space}」に移しました（同じ space: {note}）。"
+          f"作業エージェントは `sec peers` で同じ space のタスクを見られます。")
+    return 0
+
+
 def cmd_handback(args) -> int:
     with locked():
         meta = read_meta(args.id)
@@ -1600,7 +1648,9 @@ def hook_task_id() -> str | None:
     pane = os.environ.get("HERDR_PANE_ID")
     if not pane:
         return None
-    owners = [m for m in all_metas() if m.get("pane") == pane and m["status"] != CLOSED]
+    # sec move で別の space に移したペインは ID が変わるが、中のプロセスの HERDR_PANE_ID は元の ID のまま
+    owners = [m for m in all_metas()
+              if (m.get("pane") == pane or pane in m.get("pane_aliases", [])) and m["status"] != CLOSED]
     return max(owners, key=lambda m: parse_iso(m.get("started_at")))["id"] if owners else None
 
 
@@ -1978,6 +2028,11 @@ def main(argv=None) -> int:
     s.add_argument("number", type=int, nargs="?", help="選択肢の番号（1 から）")
     s.add_argument("--text", help="選択肢にない答え。「Type something.」に打ち込んで送る")
     s.set_defaults(func=cmd_choose)
+
+    s = sub.add_parser("move")
+    s.add_argument("id")
+    s.add_argument("--space", required=True, help="移す先の space の名前")
+    s.set_defaults(func=cmd_move)
 
     s = sub.add_parser("cleanup")
     s.add_argument("id")
