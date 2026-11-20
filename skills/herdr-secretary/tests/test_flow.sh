@@ -135,6 +135,18 @@ grep -q '"\[secretary\] 方針 B"' "$LOG" && fail "人間の入力中に送っ�
 expect "送りました" "$($SEC reply t001 "方針 B" --force)"
 screen 'Try "fix lint errors"'
 expect "送りました" "$($SEC reply t001 "方針 C")"
+# 入力欄に薄い文字（SGR 2）で出る入力候補は、人間の文字ではない
+screen $'\e[0m\e[2m集計行は先頭に残して\e[0m'
+expect "送りました" "$($SEC reply t001 "方針 D")"
+grep -q '"agent", "read", "t001-[0-9a-f]*", "--source", "visible", "--lines", "60", "--format", "ansi"' "$LOG" \
+  || fail "入力欄を ANSI 付きで読んでいない"
+# 色の指定に 2 が入っていても、薄い文字とは取り違えない
+screen $'\e[38;2;2;2;2mいや、やっぱり\e[0m'
+if out=$($SEC reply t001 "方針 E" 2>&1); then fail "色付きの打ちかけの文字を入力候補と取り違えた"; fi
+expect "人間が入力中なので送りませんでした" "$out"
+# 入力候補を消して打ち始めた文字は、人間の文字
+screen $'いや\e[2m\e[0m'
+if out=$($SEC reply t001 "方針 E" 2>&1); then fail "打ちかけの文字を入力候補と取り違えた"; fi
 rm "$FAKE_HERDR_STATE.screen"
 hook t001 Stop
 out=$(watch); expect "running→blocked 入力待ち" "$out"
