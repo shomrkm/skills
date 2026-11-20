@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -553,7 +554,6 @@ def task_space(meta: dict) -> str:
 
 
 def home_tag() -> str:
-    import hashlib
     return hashlib.sha1(str(home()).encode()).hexdigest()[:6]
 
 
@@ -1121,12 +1121,18 @@ def cmd_show(args) -> int:
     return 0
 
 
+PEEK_MAX_LINES = 60  # 秘書のコンテキストを守る
+
+
 def cmd_peek(args) -> int:
     meta = read_meta(args.id)
     if not meta.get("pane"):
         print("まだ起動していません。", file=sys.stderr)
         return 1
-    print(Herdr(load_config()).read(agent_name(meta), args.lines))
+    lines = min(args.lines, PEEK_MAX_LINES)
+    if lines < args.lines:
+        print(f"（--lines は {PEEK_MAX_LINES} 行までです。{lines} 行で読みます）", file=sys.stderr)
+    print(Herdr(load_config()).read(agent_name(meta), lines))
     return 0
 
 
@@ -1495,17 +1501,29 @@ def cmd_cleanup(args) -> int:
             tab_alive = meta.get("pane") in herdr.pane_ids()
     worktrees = [] if args.keep_worktree else task_worktrees(meta)
 
-    print(f"{args.id} の片付け:")
-    print(f"- タブ {meta['tab']} を閉じる（中の Claude Code も終わる）" if tab_alive else "- 閉じるタブはありません")
+    plan = [f"{args.id} の片付け:"]
+    plan.append(f"- タブ {meta['tab']} を閉じる（中の Claude Code も終わる）" if tab_alive else "- 閉じるタブはありません")
     for w in worktrees:
         note = "  ← 未コミットの変更あり。消せません" if w.get("dirty") else ""
-        print(f"- worktree {w['path']}（ブランチ {w.get('branch', '-')} は残す）を git worktree remove で消す{note}")
+        plan.append(f"- worktree {w['path']}（ブランチ {w.get('branch', '-')} は残す）を git worktree remove で消す{note}")
     if not args.keep_worktree and not worktrees:
-        print("- タスクの worktree は見つかりませんでした（リポジトリのルールで別の名前にしているかもしれません）")
+        plan.append("- タスクの worktree は見つかりませんでした（リポジトリのルールで別の名前にしているかもしれません）")
+    plan_id = hashlib.sha256("\n".join(plan).encode()).hexdigest()[:12]
     if not args.yes:
+        print("\n".join(plan))
+        with locked():
+            meta = read_meta(args.id)
+            meta["cleanup_preview"] = plan_id
+            write_meta(meta)
         print(f"\n人間の確認を取ってから `sec cleanup {args.id} --yes` で実行してください。"
               "リポジトリに worktree の消し方のルールがあれば、そちらに従ってください。")
         return 0
+    if meta.get("cleanup_preview") != plan_id:
+        # 消す前に、人間に見せる内容を一度出させる。見せた内容と今の内容が違えば、もう一度見せる
+        print("\n".join(plan))
+        print(f"\nこの内容を人間に見せていません。`sec cleanup {args.id}` で内容を出して人間の確認を取ってから、"
+              "同じオプションで `--yes` を付けてください。", file=sys.stderr)
+        return 1
 
     failed = False
     if tab_alive:

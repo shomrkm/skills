@@ -394,6 +394,8 @@ watch >/dev/null
 
 # peek は agent read で直近の画面を読む
 expect "(screen of t004-" "$($SEC peek t004)"
+# peek は 60 行で打ち切る
+expect "60 行までです" "$($SEC peek t004 --lines 500 2>&1 >/dev/null)"
 
 # hook が届かないと running のまま時間だけが過ぎる。判定の前に herdr の agent_status を見て補正する
 stale() { # stale HERDR_STATUS [pending_tool]
@@ -429,6 +431,7 @@ expect "worktree $SECRETARY_HOME/worktrees/t001（ブランチ task/t001 は残�
 echo "$out" | grep -q "other" && fail "関係ない worktree を候補にした: $out"
 expect "人間の確認を取ってから" "$out"
 [ -d "$SECRETARY_HOME/worktrees/t001" ] || fail "--yes なしで消した"
+if $SEC cleanup t001 --yes --keep-worktree 2>/dev/null; then fail "見せた内容と違うのに cleanup --yes が通った"; fi
 $SEC cleanup t001 --yes >/dev/null || fail "cleanup --yes が失敗"
 [ ! -d "$SECRETARY_HOME/worktrees/t001" ] || fail "worktree が消えていない"
 git -C "$REPO" rev-parse -q --verify task/t001 >/dev/null || fail "ブランチまで消した"
