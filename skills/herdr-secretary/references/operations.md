@@ -40,6 +40,22 @@ space の最後のタスクを `sec close` すると、space も閉じる。人�
 
 `sec new` で起動したとき、`sec reply` と `sec choose` で返事を送ったときは、自動で横に出す。止めるには `config.json` の `auto_bring` を `false` にする。秘書が herdr のペインの外で動いていて `HERDR_PANE_ID` がないときは、何もしない。
 
+## 進み具合のログ（status.tsv）
+
+作業エージェントは `sec note <種類> "<内容>" [--why "<理由>"] [--evidence "<URL やパス>"]` で、タスクフォルダの status.tsv に 1 行足す。どのタスクの行かは、`sec send` と同じく `SECRETARY_TASK_ID` か、起動したときの `HERDR_PANE_ID` で決まる。worker-settings.json で許可してあるので、確認なしで書ける。
+
+| 列 | 中身 |
+|---|---|
+| `ts` | JST の ISO 8601 の時刻（例: `2026-11-25T10:02:11+09:00`）。マシンのタイムゾーンによらず +09:00 で書く |
+| `kind` | `start`・`progress`・`decision`・`blocker`・`human`。`start` は sec が起動と `sec retry` での起動し直しのときに入れ、作業エージェントは書けない |
+| `what` | したこと、決めたこと、詰まっていることを 1 行 |
+| `why` | 理由。なければ空 |
+| `evidence` | PR の URL、コミット、worktree やファイルのパス。なければ空 |
+
+行は追記するだけで、書き換えも削除もしない。`sec note` は、セルの中のタブと改行を空白にし、`=`・`+`・`-`・`@` で始まるセルの頭に `'` を付ける。表計算ソフトで開いても式として動かない。人間がターミナルで読むときは、`column -s$'\t' -t status.tsv` で表になる。
+
+`sec show` は、読んだ行数を meta.json の `status_seen` に記録し、次はそれより後の行だけを出す。`sec cleanup` は、worktree の候補を探すときに status.tsv の中のパスも見る。
+
 ## 作業エージェント同士の伝言
 
 同じ space のタスクの作業エージェントは、`sec send <id> "<伝言>"` で相手に直接伝言を送れる。prompt.md には、送り方と、同じ space のタスクの一覧が載る。後から加わったタスクは `sec peers` で見られる。

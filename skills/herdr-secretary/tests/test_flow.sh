@@ -651,6 +651,49 @@ expect "t011 は space「bring-b」に戻しました。タブは残していま
 $SEC close t009 >/dev/null
 out=$(watch); echo "$out" | grep -q "ペインが見つからない" && fail "動かしたペインを消えたと判定した: $out"
 
+# 作業エージェントは sec note で進み具合を status.tsv に 1 行ずつ足し、秘書は sec show でまだ読んでいない行を読む
+expect "t012 queued→running" "$($SEC new --repo myrepo --title notes --done d --request r)"
+hook t012 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
+ST="$SECRETARY_HOME/tasks/t012/status.tsv"
+[ "$(head -1 "$ST")" = "$(printf 'ts\tkind\twhat\twhy\tevidence')" ] || fail "status.tsv に見出しの行がない"
+sed -n 2p "$ST" | grep -q "	start	作業エージェントを起動した	" || fail "起動したときに start の行を入れていない"
+grep -q "note <種類>" "$SECRETARY_HOME/tasks/t012/prompt.md" || fail "prompt.md で sec note を案内していない"
+grep -q "bin/sec note:\*" "$SECRETARY_HOME/worker-settings.json" || fail "作業エージェントに sec note を許可していない"
+if out=$($SEC note progress x 2>&1); then fail "作業エージェントの外から記録できた"; fi
+expect "作業エージェントのペインから使います" "$out"
+if SECRETARY_TASK_ID=t012 $SEC note start x 2>/dev/null; then fail "start を作業エージェントが書けた"; fi
+expect "記録しました（decision）" "$(SECRETARY_TASK_ID=t012 $SEC note decision "preload にした" --why "JOIN が遅い" --evidence "=HYPERLINK(1)")"
+# 起動したときの HERDR_PANE_ID からも、どのタスクかが分かる。タブと改行は 1 行に直す
+HERDR_PANE_ID=$(meta t012 pane) $SEC note blocker $'spec が\t落ちる\n2 件' >/dev/null
+[ "$(wc -l < "$ST")" -eq 4 ] || fail "1 件が 1 行になっていない: $(cat "$ST")"
+awk -F'\t' 'NF != 5 { exit 1 }' "$ST" || fail "列の数が 5 でない行がある"
+sed -n 3p "$ST" | grep -q "	'=HYPERLINK(1)$" || fail "式に見えるセルの頭に ' を付けていない"
+sed -n 4p "$ST" | grep -q "	spec が 落ちる 2 件	" || fail "タブと改行を空白に直していない"
+sed -n 3p "$ST" | cut -f1 | grep -q '+09:00$' || fail "時刻が JST でない"
+out=$($SEC show t012)
+expect "\[decision\] preload にした" "$out"
+expect "理由: JOIN が遅い" "$out"
+expect "根拠: =HYPERLINK(1)" "$out"
+expect "\[blocker\] spec が 落ちる 2 件" "$out"
+expect "前回から増えた行はありません（全 3 行" "$($SEC show t012)"
+SECRETARY_TASK_ID=t012 $SEC note progress "spec を直した" >/dev/null
+out=$($SEC show t012)
+expect "spec を直した" "$out"
+echo "$out" | grep -q "preload にした" && fail "読んだ行をもう一度出した"
+expect "preload にした" "$($SEC show t012 --all)"
+# 読んでいない行が多ければ、最後の 20 行だけを出す
+for i in $(seq 1 25); do SECRETARY_TASK_ID=t012 $SEC note progress "step $i" >/dev/null; done
+out=$($SEC show t012)
+expect "前の 9 行は省略" "$out"
+echo "$out" | grep -q "step 5$" && fail "省略した行を出した"
+expect "step 25" "$out"
+# 古い形式の status.md が残っていれば、変わったときだけ出す
+echo "旧形式のメモ" > "$SECRETARY_HOME/tasks/t012/status.md"
+expect "旧形式のメモ" "$($SEC show t012)"
+expect "status.md（古い形式）" "$($SEC show t012)"
+$SEC show t012 | grep -q "旧形式のメモ" && fail "変わっていない status.md をもう一度出した"
+$SEC close t012 >/dev/null
+
 # 静かな時間帯（既定 18:00〜09:00）は通知を出さず、明けたら溜まった変化を 1 行にまとめて出す
 python3 - "$HERE/../scripts" <<'PY'
 import sys; sys.path.insert(0, sys.argv[1])

@@ -41,7 +41,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -166,6 +166,63 @@ def all_metas() -> list[dict]:
         if (d / "meta.json").exists():
             metas.append(json.loads((d / "meta.json").read_text()))
     return metas
+
+
+# ---------------------------------------------------------------------------
+# 進み具合のログ（status.tsv）
+# ---------------------------------------------------------------------------
+#
+# 作業エージェントが sec note で 1 件 1 行を追記する。上書きも削除もしない。秘書は sec show で
+# まだ読んでいない行だけを読む。人間も `column -s$'\t' -t status.tsv` でそのまま読める。
+
+STATUS_COLUMNS = ("ts", "kind", "what", "why", "evidence")
+NOTE_KINDS = ("progress", "decision", "blocker", "human")  # start は sec だけが書く
+JST = timezone(timedelta(hours=9), "JST")
+STATUS_SHOW_MAX = 20
+FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def status_log(task_id: str) -> Path:
+    return task_dir(task_id) / "status.tsv"
+
+
+def tsv_cell(text: str) -> str:
+    """1 つのセルを 1 行に収める。表計算ソフトで開いたときに式として動かないよう、式に見える頭に ' を付ける。"""
+    v = " ".join(str(text).replace("\t", " ").split())
+    return f"'{v}" if v.startswith(FORMULA_PREFIXES) else v
+
+
+def append_status(task_id: str, kind: str, what: str, why: str = "", evidence: str = "") -> None:
+    p = status_log(task_id)
+    ts = datetime.now(JST).isoformat(timespec="seconds")
+    with open(p, "a", encoding="utf-8") as f:
+        if f.tell() == 0:
+            f.write("\t".join(STATUS_COLUMNS) + "\n")
+        f.write("\t".join([ts, *(tsv_cell(c) for c in (kind, what, why, evidence))]) + "\n")
+
+
+def read_status(task_id: str) -> list[dict]:
+    p = status_log(task_id)
+    if not p.exists():
+        return []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines()[1:]:
+        if line.strip():
+            cells = (line.split("\t") + [""] * len(STATUS_COLUMNS))[:len(STATUS_COLUMNS)]
+            rows.append(dict(zip(STATUS_COLUMNS, cells)))
+    return rows
+
+
+def status_line(row: dict) -> str:
+    def plain(v: str) -> str:
+        return v[1:] if v[:1] == "'" and v[1:2] in FORMULA_PREFIXES else v
+    with contextlib.suppress(ValueError):
+        row = {**row, "ts": datetime.fromisoformat(row["ts"]).astimezone(JST).strftime("%m/%d %H:%M")}
+    out = f"- {row['ts']} [{row['kind']}] {plain(row['what'])}"
+    for label, key in (("理由", "why"), ("根拠", "evidence")):
+        if row.get(key):
+            out += f"\n  - {label}: {plain(row[key])}"
+    return out
 
 
 def has_result(task_id: str) -> bool:
@@ -504,14 +561,14 @@ def trust_dirs(settings: dict, dirs: list[Path]) -> None:
 
 
 def worker_cli_rules() -> list[str]:
-    """作業エージェントが確認なしで使える sec のサブコマンド（同じ space のタスクとのやり取り）。"""
+    """作業エージェントが確認なしで使える sec のサブコマンド（同じ space のタスクとのやり取りと、進み具合の記録）。"""
     wrapper = home() / "bin" / "sec"
-    return [f"Bash({wrapper} send:*)", f"Bash({wrapper} peers:*)"]
+    return [f"Bash({wrapper} send:*)", f"Bash({wrapper} peers:*)", f"Bash({wrapper} note:*)"]
 
 
 def prepare_worker_settings(meta: dict, settings_path: Path) -> None:
     """repos.md は init の後にも書き足されるので、起動のたびにそのリポジトリの worktree 置き場を設定に足す。
-    sec send / peers の許可も、init をやり直していない秘書ディレクトリに足す。"""
+    sec send / peers / note の許可も、init をやり直していない秘書ディレクトリに足す。"""
     settings = json.loads(settings_path.read_text())
     before = json.dumps(settings)
     wt = repo_worktrees_dir(Path(meta["repo"]))
@@ -817,6 +874,7 @@ def launch(meta: dict, herdr: Herdr) -> str | None:
             meta["pending_first_prompt"] = True
             return transition(meta, BLOCKED, f"起動時の確認待ち（ペイン {meta.get('pane')} で答えてから retry）")
         raise
+    append_status(meta["id"], "start", "作業エージェントを起動した", evidence=f"pane {meta.get('pane')}")
     send_first_prompt(meta, herdr)
     return transition(meta, RUNNING, "起動")
 
@@ -1022,7 +1080,10 @@ PROMPT_TEMPLATE = """# タスク {id}: {title}
 
 - 作業場所（git worktree など）は、このリポジトリのルール（CLAUDE.md など）に従って用意してください。ルールがなければ `{worktree}` に git worktree を作ってください（ここは許可なしで読み書きできます）。
 - PR の作り方やテストの方法など、作業の進め方はこのリポジトリのルールに従ってください。
-- 進捗・方針の変更・詰まっている点は `{status}` に書いてください。人間から直接指示を受けたときも、何が変わったかをここに書いてください。
+- 進み具合は `{sec} note <種類> "<1 行の内容>"` で記録してください。記録は `{status}` に 1 件 1 行で追記され、秘書はまだ読んでいない行を読んで人間に報告します。このファイルを直接書き換えないでください。
+  - 種類は `progress`（区切りがついた）、`decision`（方針を決めた。`--why "<理由>"` を付ける）、`blocker`（詰まっている点。作業を止めて質問するほどではないとき）、`human`（人間から直接指示を受けて、何かが変わった）のどれかです。
+  - PR の URL、コミット、worktree やファイルのパスは `--evidence "<URL やパス>"` に入れてください。
+  - 判断の分かれ目と区切りだけを記録し、細かい操作は書かなくて大丈夫です。長い説明が要るときは、本文をタスクフォルダの別のファイルに書き、そのパスを `--evidence` に入れてください。
 - 完了条件を満たしたら `{result}` に、要約・変更したファイル・PR の URL（あれば）・残課題を書いてください。このファイルは完了したときにだけ作ってください。
 - 判断に迷ったら、作業を止めて質問してください。秘書が人間に取り次ぎます。
 - タスクフォルダのほかのファイル（meta.json など）は秘書が管理しているので、読み書きしなくて大丈夫です。
@@ -1112,7 +1173,7 @@ def cmd_new(args) -> int:
         (d / "prompt.md").write_text(PROMPT_TEMPLATE.format(
             id=tid, title=args.title, request=request, done=done, attachments=attachments_section(attached),
             peers=peers_section(tid, space) if space else "",
-            status=d / "status.md", result=d / "result.md", worktree=home() / "worktrees" / tid))
+            status=status_log(tid), sec=home() / "bin" / "sec", result=d / "result.md", worktree=home() / "worktrees" / tid))
         meta = {"id": tid, "title": args.title, "name": name, "repo": str(repo), "status": QUEUED,
                 "reason": "", "created_at": now_iso(), "status_since": now_iso(), "pane": None,
                 "history": []}
@@ -1169,13 +1230,61 @@ def cmd_inbox(args) -> int:
 
 
 def cmd_show(args) -> int:
+    """status.tsv のまだ読んでいない行と result.md を出す。--all なら status.tsv を全部出す。"""
     d = task_dir(args.id)
+    if not (d / "meta.json").exists():
+        print(f"{args.id} というタスクはありません。", file=sys.stderr)
+        return 1
     meta = read_meta(args.id)
+    rows = read_status(args.id)
+    seen = 0 if args.all else min(meta.get("status_seen", 0), len(rows))
+    new = rows[seen:]
     print(f"# {meta['id']} [{meta['status']}] {meta['title']}  pane={meta.get('pane')}  repo={meta['repo']}")
-    for name in ("status.md", "result.md"):
-        p = d / name
-        print(f"\n## {name}\n")
-        print(p.read_text().strip() if p.exists() else "（まだない）")
+    print("\n## 進み具合（status.tsv）\n")
+    if not rows:
+        print("（まだない）")
+    elif not new:
+        print(f"前回から増えた行はありません（全 {len(rows)} 行。全部見るなら `sec show {args.id} --all`）")
+    else:
+        shown = new if args.all else new[-STATUS_SHOW_MAX:]
+        skipped = len(rows) - len(shown)
+        if skipped:
+            print(f"（前の {skipped} 行は省略。全部見るなら `sec show {args.id} --all`）")
+        print("\n".join(status_line(r) for r in shown))
+    # 古い形式。このスキルの更新前に起動したタスクや、作業エージェントが直接書いたときに残る
+    legacy = d / "status.md"
+    if legacy.exists():
+        mtime = legacy.stat().st_mtime
+        print("\n## status.md（古い形式）\n")
+        if args.all or mtime > meta.get("status_md_seen_mtime", 0):
+            print(legacy.read_text().strip() or "（空）")
+        else:
+            print(f"前回から変わっていません（全文は `sec show {args.id} --all`）")
+    else:
+        mtime = None
+    p = d / "result.md"
+    print("\n## result.md\n")
+    print(p.read_text().strip() if p.exists() else "（まだない）")
+    with locked():
+        meta = read_meta(args.id)
+        meta["status_seen"] = len(rows)
+        if mtime is not None:
+            meta["status_md_seen_mtime"] = mtime
+        write_meta(meta)
+    return 0
+
+
+def cmd_note(args) -> int:
+    """作業エージェントが、進み具合を status.tsv に 1 行足す。"""
+    me = caller_task("note")
+    if me is None:
+        return 1
+    what = " ".join(args.what.split())
+    if not what:
+        print("内容が空です。", file=sys.stderr)
+        return 2
+    append_status(me["id"], args.kind, what, args.why or "", args.evidence or "")
+    print(f"{me['id']} の進み具合に記録しました（{args.kind}）。")
     return 0
 
 
@@ -1238,8 +1347,8 @@ def caller_task(command: str) -> dict | None:
     """sec send / peers を呼んだ作業エージェントのタスク。作業エージェントのペインの外なら None。"""
     task_id = hook_task_id()
     if not task_id or not (task_dir(task_id) / "meta.json").exists():
-        print(f"sec {command} は作業エージェントのペインから使います（タスクが分かりません）。"
-              "秘書からタスクに送るときは sec reply を使ってください。", file=sys.stderr)
+        hint = "" if command == "note" else "秘書からタスクに送るときは sec reply を使ってください。"
+        print(f"sec {command} は作業エージェントのペインから使います（タスクが分かりません）。{hint}", file=sys.stderr)
         return None
     return read_meta(task_id)
 
@@ -1277,7 +1386,7 @@ def cmd_send(args) -> int:
         typing = herdr.input_text(agent_name(to))
     if typing:
         print(f"{args.id} の入力欄に人間が打ちかけの文字があるので送りませんでした。少し待ってから送り直すか、"
-              "急ぐなら status.md に書いて秘書に伝えてください。", file=sys.stderr)
+              "急ぐなら `sec note blocker` で秘書に伝えてください。", file=sys.stderr)
         return 1
     sec = home() / "bin" / "sec"
     try:
@@ -1285,7 +1394,7 @@ def cmd_send(args) -> int:
                                      f"返事は `{sec} send {me['id']} \"...\"`）: {text}")
     except HerdrError as e:
         why = "許可や選択肢のダイアログで止まっている" if e.code == "agent_blocked" else str(e)
-        print(f"{args.id} に送れませんでした（{why}）。後で送り直すか、status.md に書いて秘書に伝えてください。", file=sys.stderr)
+        print(f"{args.id} に送れませんでした（{why}）。後で送り直すか、`sec note blocker` で秘書に伝えてください。", file=sys.stderr)
         return 1
     record_event({"time": now_iso(), "task_id": me["id"], "event": "Message", "to": args.id, "text": text})
     with locked():
@@ -1434,6 +1543,8 @@ def cmd_retry(args) -> int:
             if agent_name(meta) not in herdr.agent_names():
                 herdr.start_agent(meta, home() / "worker-settings.json")
                 meta.pop("agent_gone", None)
+                append_status(meta["id"], "start", "sec retry で作業エージェントを起動し直した",
+                              evidence=f"pane {meta.get('pane')}")
             text = herdr.input_text(agent_name(meta))
             if text and SECRETARY_MARK in text:
                 # 前に送った指示が入力欄に残っている。もう一度打つと 2 つ並ぶので、Enter だけ送る
@@ -1685,7 +1796,7 @@ def task_worktrees(meta: dict) -> list[dict]:
             cur["path"] = line.removeprefix("worktree ")
         elif line.startswith("branch "):
             cur["branch"] = line.removeprefix("branch refs/heads/")
-    docs = "".join((task_dir(meta["id"]) / n).read_text() for n in ("status.md", "result.md")
+    docs = "".join((task_dir(meta["id"]) / n).read_text() for n in ("status.tsv", "status.md", "result.md")
                    if (task_dir(meta["id"]) / n).exists())
     id_re = re.compile(rf"(?<![0-9a-z]){re.escape(meta['id'])}(?![0-9])")
     found = []
@@ -2170,7 +2281,19 @@ def main(argv=None) -> int:
 
     sub.add_parser("inbox").set_defaults(func=cmd_inbox)
 
-    for name, func in (("show", cmd_show), ("handback", cmd_handback), ("retry", cmd_retry)):
+    s = sub.add_parser("show")
+    s.add_argument("id")
+    s.add_argument("--all", action="store_true", help="status.tsv を読んだ行も含めて全部出す")
+    s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("note", help="作業エージェントが進み具合を 1 行記録する")
+    s.add_argument("kind", choices=NOTE_KINDS)
+    s.add_argument("what", help="したこと、決めたこと、詰まっていることを 1 行で")
+    s.add_argument("--why", help="理由")
+    s.add_argument("--evidence", help="PR の URL、コミット、パスなど")
+    s.set_defaults(func=cmd_note)
+
+    for name, func in (("handback", cmd_handback), ("retry", cmd_retry)):
         s = sub.add_parser(name)
         s.add_argument("id")
         s.set_defaults(func=func)
