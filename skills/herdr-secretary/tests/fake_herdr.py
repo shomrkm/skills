@@ -7,8 +7,10 @@ $FAKE_HERDR_STATE.not_ready にエージェント名を書くと、その agent 
 $FAKE_HERDR_STATE.version に版を書くと、--version がその版を返す（既定は 0.9.5）。
 $FAKE_HERDR_STATE.mismatch があると、status --json がサーバーとの protocol の不一致を返す。
 agent list の agent_status は状態ファイルの "status"（名前 → 状態）で変えられる（既定は working）。
-ワークスペースは "workspaces"（ID → ラベル）、タブは "tabs"（タブ ID → ペイン ID）に持つ。
+ワークスペースは "workspaces"（ID → ラベル）、タブは "tabs"（タブ ID → ペイン ID の一覧）に持つ。
 ID は作った順の通し番号で、ワークスペース w<k> のタブとペインは w<k>:t<n> / w<k>:p<n>。
+pane move で別のワークスペースに動かしたペインは、新しい ID になる。"zoomed" にタブ ID を書くと、そのタブはズーム中。
+pane current --current は $HERDR_PANE_ID のペインを返す。
 $FAKE_HERDR_STATE.screen に書いた内容を agent read が画面として返す（なければ "(screen of <名前>)"）。
 """
 import json
@@ -66,26 +68,43 @@ if (group, cmd) == ("status", "--json"):
     }))
     sys.exit(0)
 
-if (group, cmd) == ("pane", "list"):
-    ok("pane_list", panes=[{"pane_id": p, "terminal_id": "t", "workspace_id": p.split(":")[0],
-                            "tab_id": p.replace(":p", ":t"), "focused": False, "agent_status": "idle"}
-                           for p in state["panes"]])
-
 workspaces = state.setdefault("workspaces", {})
 tabs = state.setdefault("tabs", {})
+
+
+def tab_of(pane):
+    return next((t for t, ps in tabs.items() if pane in ps), pane.replace(":p", ":t"))
+
+
+def pane_info(pane):
+    return {"pane_id": pane, "terminal_id": "t", "workspace_id": pane.split(":")[0],
+            "tab_id": tab_of(pane), "focused": False, "agent_status": "idle"}
+
+
+if (group, cmd) == ("pane", "list"):
+    ok("pane_list", panes=[pane_info(p) for p in state["panes"]])
+
+if (group, cmd) == ("pane", "current"):
+    pane = os.environ.get("HERDR_PANE_ID")
+    if not pane:
+        err("pane_not_found", "--current requires HERDR_PANE_ID")
+    pane = state.get("aliases", {}).get(pane, pane)
+    if pane not in state["panes"]:
+        err("pane_not_found", pane)
+    ok("pane_current", pane=pane_info(pane))
 
 
 def new_tab(ws):
     state["n"] += 1
     pane, tab = f"{ws}:p{state['n']}", f"{ws}:t{state['n']}"
     state["panes"].append(pane)
-    tabs[tab] = pane
+    tabs[tab] = [pane]
     state.setdefault("env", {})[pane] = [args[i + 1] for i, a in enumerate(args) if a == "--env"]
     return tab, pane
 
 
 def close_tabs(gone_tabs):
-    gone = {tabs.pop(t) for t in gone_tabs if t in tabs}
+    gone = {p for t in gone_tabs if t in tabs for p in tabs.pop(t)}
     state["panes"] = [p for p in state["panes"] if p not in gone]
     state["agents"] = {n: p for n, p in state["agents"].items() if p not in gone}
 
@@ -154,6 +173,72 @@ if (group, cmd) == ("tab", "create"):
     ok("tab_created", tab={"tab_id": tab, "label": flag("--label"), "workspace_id": ws},
        root_pane={"pane_id": pane, "terminal_id": "t", "workspace_id": ws, "tab_id": tab, "focused": False,
                   "cwd": flag("--cwd"), "agent_status": "unknown"})
+
+if (group, cmd) == ("pane", "close"):
+    pane = args[2]
+    if pane not in state["panes"]:
+        err("pane_not_found", pane)
+    tab = tab_of(pane)
+    tabs[tab].remove(pane)
+    state["panes"].remove(pane)
+    state["agents"] = {n: p for n, p in state["agents"].items() if p != pane}
+    if not tabs[tab]:
+        del tabs[tab]
+    save()
+    ok("pane_closed", pane_id=pane)
+
+if (group, cmd) == ("pane", "move"):
+    assert "--no-focus" in args, "フォーカスを奪ってはいけない"
+    pane = args[2]
+    if pane not in state["panes"]:
+        err("pane_not_found", "source pane not found")
+    src_tab, src_ws = tab_of(pane), pane.split(":")[0]
+    base = {"previous_pane_id": pane, "previous_workspace_id": src_ws, "previous_tab_id": src_tab}
+    dest_tab = flag("--tab")
+    if dest_tab is not None and dest_tab not in tabs:
+        err("tab_not_found", dest_tab)
+    if dest_tab is not None and flag("--split") is None:
+        err("usage", "missing required --split")
+    zoomed = state.get("zoomed", [])
+    if src_tab in zoomed or dest_tab in zoomed:
+        ok("pane_move", move_result={**base, "changed": False, "reason": "zoomed_tab", "pane": pane_info(pane)})
+    if dest_tab == src_tab:
+        ok("pane_move", move_result={**base, "changed": False, "reason": "same_tab", "pane": pane_info(pane)})
+    result = {}
+    if dest_tab is not None:
+        dest_ws = dest_tab.split(":")[0]
+    elif "--new-tab" in args:
+        dest_ws = flag("--workspace", src_ws)
+        if dest_ws not in workspaces:
+            err("workspace_not_found", f"workspace {dest_ws} not found")
+    else:
+        state["wn"] = state.get("wn", 0) + 1
+        dest_ws = f"w{state['wn']}"
+        workspaces[dest_ws] = flag("--label", dest_ws)
+        result["created_workspace"] = {"workspace_id": dest_ws, "label": workspaces[dest_ws]}
+    tabs[src_tab].remove(pane)
+    if not tabs[src_tab]:
+        del tabs[src_tab]
+        result["closed_tab_id"] = src_tab
+    new = pane
+    if dest_ws != src_ws:
+        state["n"] += 1
+        new = f"{dest_ws}:p{state['n']}"
+        state.setdefault("aliases", {})[pane] = new
+        state["panes"] = [new if p == pane else p for p in state["panes"]]
+        state["agents"] = {n: (new if p == pane else p) for n, p in state["agents"].items()}
+        if not any(t.startswith(f"{src_ws}:") for t in tabs):
+            del workspaces[src_ws]
+            result["closed_workspace_id"] = src_ws
+    if dest_tab is None:
+        state["n"] += 1
+        dest_tab = f"{dest_ws}:t{state['n']}"
+        tabs[dest_tab] = []
+        result["created_tab"] = {"tab_id": dest_tab, "workspace_id": dest_ws,
+                                 "label": flag("--tab-label") if "--new-workspace" in args else flag("--label")}
+    tabs[dest_tab].append(new)
+    save()
+    ok("pane_move", move_result={**base, **result, "changed": True, "pane": pane_info(new), "focused_pane_id": new})
 
 if (group, cmd) == ("agent", "start"):
     name, pane = args[2], flag("--pane")

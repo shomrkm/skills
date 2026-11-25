@@ -576,6 +576,81 @@ hook t008 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
 expect "タブ $(meta t008 tab) を閉じました" "$($SEC close t008)"
 grep -q "\"workspace\", \"close\", \"$HW\"" "$LOG" && fail "人間のタブが残る space を閉じた"
 
+# 人間が話題にしたタスクのペインを 1 つだけ秘書の横に並べ、別のタスクの話になったら前のペインを space に戻す
+python3 - <<PY
+import json; p="$SECRETARY_HOME/config.json"; c=json.load(open(p)); c["max_parallel"]=10; json.dump(c,open(p,"w"))
+PY
+rm -f "$FAKE_HERDR_STATE.screen"
+SW=$($HERDR_BIN workspace create --label secretary --no-focus | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['workspace']['workspace_id'])")
+SP="$SW:p$(python3 -c "import json; print(json.load(open('$FAKE_HERDR_STATE'))['n'])")"
+ST=$(echo "$SP" | sed 's/:p/:t/')
+# 秘書が herdr の外にいるときは、並べずに登録だけする
+out=$($SEC new --repo myrepo --title alpha --space bring-a --done d --request r)
+expect "t009 queued→running" "$out"
+echo "$out" | grep -q "秘書の横" && fail "herdr の外で並べようとした"
+if out=$($SEC bring t009 2>&1); then fail "herdr の外で bring できた"; fi
+expect "herdr のペインの外" "$out"
+if out=$(HERDR_PANE_ID=x $SEC bring t999 2>&1); then fail "ないタスクを bring できた"; fi
+expect "t999 というタスクはありません" "$out"
+# 起動したタスクは秘書の横に並ぶ。space のワークスペースが空になれば herdr が閉じる
+P9=$(meta t009 pane)
+out=$(HERDR_PANE_ID=$SP $SEC bring t009)
+expect "t009 を秘書の横に表示しました" "$out"
+grep -q "\"pane\", \"move\", \"$P9\", \"--tab\", \"$ST\", \"--split\", \"right\", \"--target-pane\", \"$SP\", \"--no-focus\"" "$LOG" \
+  || fail "秘書のタブに並べていない"
+[ "$(meta t009 tab)" = "$ST" ] || fail "並べたあとのタブを記録していない"
+[ "$(meta t009 pane)" != "$P9" ] || fail "動かしたあとのペイン ID を記録していない"
+expect "space=bring-a（秘書の横に表示中）" "$($SEC list)"
+expect "t009 はもう秘書の横に表示しています" "$(HERDR_PANE_ID=$SP $SEC bring t009)"
+# 動かす前のペイン ID で hook が来ても、そのタスクのイベントとして記録する
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"[secretary] prompt.md を読んで"}' | HERDR_PANE_ID=$P9 $SEC hook
+tail -1 "$SECRETARY_HOME/events.jsonl" | grep -q '"task_id": *"t009"' || fail "動かす前のペイン ID で hook を引けていない"
+out=$(watch); echo "$out" | grep -q "ペインが見つからない" && fail "動かしたペインを消えたと判定した: $out"
+# 新しく依頼したタスクを並べ、前のタスクは space に戻す。space がもうなければ作り直す
+out=$(HERDR_PANE_ID=$SP $SEC new --repo myrepo --title beta --space bring-b --done d --request r)
+expect "t010 を秘書の横に表示しました。t009 は space「bring-a」に戻しました" "$out"
+grep -q '"--new-workspace", "--label", "bring-a", "--tab-label", "t009 alpha", "--no-focus"' "$LOG" \
+  || fail "space がないのに作り直して戻していない"
+[ "$(meta t009 shown)" = "None" ] || fail "戻したタスクを表示中のままにした"
+[ "$(meta t009 workspace)" != "$SW" ] || fail "戻したタスクが秘書のワークスペースにいる"
+hook t010 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
+# 表示中のタスクと同じ space の新しいタスクは、秘書のワークスペースではなく space に開く
+expect "t011 queued→running" "$($SEC new --repo myrepo --title gamma --space bring-b --done d --request r)"
+hook t011 UserPromptSubmit ',"prompt":"[secretary] prompt.md を読んで"'
+[ "$(meta t011 workspace)" != "$SW" ] || fail "表示中のタスクの space として秘書のワークスペースにタブを足した"
+# 返事を送ったタスクも横に出す。戻すときは space にいるタスクのワークスペースにタブを足す
+out=$(HERDR_PANE_ID=$SP $SEC reply t011 "進めて")
+expect "t011 を秘書の横に表示しました。t010 は space「bring-b」に戻しました" "$out"
+expect "送りました" "$out"
+[ "$(meta t010 workspace)" = "$(python3 -c "import json; print([w for w,l in json.load(open('$FAKE_HERDR_STATE'))['workspaces'].items() if l=='bring-b'][0])")" ] \
+  || fail "space のワークスペースに戻していない"
+# 戻すだけもできる
+expect "t011 は space「bring-b」に戻しました" "$(HERDR_PANE_ID=$SP $SEC bring --back)"
+expect "表示しているタスクはありません" "$(HERDR_PANE_ID=$SP $SEC bring --back)"
+# ズーム中は並べられないと伝える
+python3 - <<PY
+import json; p="$FAKE_HERDR_STATE"; s=json.load(open(p)); s["zoomed"]=["$ST"]; json.dump(s,open(p,"w"))
+PY
+if out=$(HERDR_PANE_ID=$SP $SEC bring t010 2>&1); then fail "ズーム中に並べたことにした"; fi
+expect "ズーム中" "$out"
+[ "$(meta t010 shown)" = "None" ] || fail "並べられなかったのに表示中にした"
+python3 - <<PY
+import json; p="$FAKE_HERDR_STATE"; s=json.load(open(p)); s["zoomed"]=[]; json.dump(s,open(p,"w"))
+PY
+# 表示中のタスクを閉じても、秘書のタブは閉じない
+HERDR_PANE_ID=$SP $SEC bring t010 >/dev/null
+P10=$(meta t010 pane)
+out=$($SEC close t010)
+expect "秘書の横に表示していたペイン $P10 を閉じました" "$out"
+grep -q "\"pane\", \"close\", \"$P10\"" "$LOG" || fail "表示中のペインを閉じていない"
+grep -q "\"tab\", \"close\", \"$ST\"" "$LOG" && fail "秘書のタブを閉じた"
+$HERDR_BIN tab list --workspace "$SW" | grep -q "\"$ST\"" || fail "秘書のタブが消えた"
+# --keep-tab なら space に戻して残す
+HERDR_PANE_ID=$SP $SEC bring t011 >/dev/null
+expect "t011 は space「bring-b」に戻しました。タブは残しています" "$($SEC close t011 --keep-tab)"
+$SEC close t009 >/dev/null
+out=$(watch); echo "$out" | grep -q "ペインが見つからない" && fail "動かしたペインを消えたと判定した: $out"
+
 # 静かな時間帯（既定 18:00〜09:00）は通知を出さず、明けたら溜まった変化を 1 行にまとめて出す
 python3 - "$HERE/../scripts" <<'PY'
 import sys; sys.path.insert(0, sys.argv[1])
