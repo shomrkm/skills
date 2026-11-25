@@ -61,6 +61,9 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 | ペインとエージェントの生存確認 | `herdr pane list` / `herdr agent list` |
 | 画面を読む（`sec peek`） | `herdr agent read <agent> --source recent-unwrapped --lines N`（JSON ではなく生のテキストが返る） |
 | 選択肢を選ぶ（`sec choose`） | `herdr agent send-keys <agent> down ... enter`（カーソルは先頭の選択肢にあるので、番号 - 1 回 down） |
+| タスクを秘書の横に出す（`sec bring`） | `herdr pane current --current` で秘書のペインとタブを取り、`herdr pane move <pane> --tab <秘書のタブ> --split right --target-pane <秘書のペイン> --no-focus`。結果の `.result.move_result.pane` で、新しいペイン ID・タブ・ワークスペースを記録する |
+| 横に出していたタスクを space に戻す | `herdr pane move <pane> --new-tab --workspace <space> --label <id 名前> --no-focus`。space がなければ `herdr pane move <pane> --new-workspace --label <space> --tab-label <id 名前> --no-focus` |
+| 横に出したタスクを閉じる（`sec close`） | `herdr pane close <pane>`。秘書のタブは閉じない |
 | タブを閉じる（`sec close` / `sec cleanup`） | `herdr tab close <tab>`。space に残るのがそのタブだけで、同じ space に閉じていないタスクもなければ `herdr workspace close <ws>`（`herdr tab list --workspace <ws>` で確かめる） |
 | 版とサーバーの確認（`sec doctor`） | `herdr --version` / `herdr status --json`（`server.compatible`、`restart_needed`） |
 
@@ -148,4 +151,6 @@ herdr をソースからビルドし、ヘッドレスのサーバーを立て�
 | `permission_repeat_quiet_min` | 10 | 同じタスクで同じ種類の許可待ち（同じルール候補、または保護パス）が続いたら、最初の通知からこの分数は通知を重ねない。0 で無効 |
 | `update_check` | `true` | `sec watch` の起動時に、スキルのリポジトリが upstream より遅れていないか、hook の向き先が合っているかを確かめる |
 | `notify` | `auto` | デスクトップ通知。`auto` は macOS なら osascript。`off` で無効。`{text}` を含むコマンドも書ける |
+| `auto_bring` | `true` | `sec new` で起動したタスクと、`sec reply`・`sec choose` で返事を送ったタスクを、秘書の横に出す |
+| `bring_split` | `right` | `sec bring` でタスクのペインを秘書のペインのどちら側に並べるか。`right` か `down` |
 | `herdr_bin` | `herdr` | herdr のコマンド名 |

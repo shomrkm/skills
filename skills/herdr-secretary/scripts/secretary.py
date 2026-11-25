@@ -91,6 +91,9 @@ DEFAULT_CONFIG = {
     "notify": "auto",
     "poll_interval_sec": 1.0,
     "herdr_bin": "herdr",
+    # 人間が話題にしたタスクのペインを、秘書のペインの横に並べる。並べる向きは right か down
+    "auto_bring": True,
+    "bring_split": "right",
 }
 
 
@@ -681,8 +684,25 @@ class Herdr:
         except json.JSONDecodeError:
             return {"text": r.stdout}
 
+    def panes(self) -> dict[str, dict]:
+        return {p["pane_id"]: p for p in self._run("pane", "list").get("panes", [])}
+
     def pane_ids(self) -> set[str]:
-        return {p["pane_id"] for p in self._run("pane", "list").get("panes", [])}
+        return set(self.panes())
+
+    def current_pane(self) -> dict | None:
+        """このコマンドを呼んだペイン（秘書のペイン）。herdr のペインの外なら None。"""
+        if not os.environ.get("HERDR_PANE_ID"):
+            return None
+        return self._run("pane", "current", "--current").get("pane")
+
+    def move_pane(self, pane: str, *destination: str) -> dict:
+        """ペインを中のプロセスごと動かす（フォーカスは移さない）。別のワークスペースに動かすとペイン ID が変わる。
+        元のタブが空になればタブが閉じ、元のワークスペースが空になればワークスペースも閉じる。"""
+        return self._run("pane", "move", pane, *destination, "--no-focus").get("move_result", {})
+
+    def close_pane(self, pane: str) -> None:
+        self._run("pane", "close", pane)
 
     def agent_statuses(self) -> dict[str, str]:
         """名前付きエージェントの agent_status（idle / working / blocked / done / unknown）。"""
@@ -725,7 +745,8 @@ class Herdr:
         live = self.workspaces()
         ids = {w["workspace_id"] for w in live}
         for m in space_peers(meta["id"], task_space(meta)):
-            if m.get("workspace") in ids:
+            # 秘書の横に表示しているタスクは、space のワークスペースにいない
+            if m.get("workspace") in ids and not m.get("shown"):
                 return m["workspace"]
         return next((w["workspace_id"] for w in live if w.get("label") == task_space(meta)), None)
 
@@ -1104,6 +1125,8 @@ def cmd_new(args) -> int:
         print(f"{tid} を登録しました（キュー待ち。並列上限 {cfg['max_parallel']}）")
     for line in lines:
         print(line)
+    if meta.get("pane"):
+        auto_bring(tid, cfg)
     return 0
 
 
@@ -1129,7 +1152,7 @@ def cmd_list(args) -> int:
     for m in metas:
         reason = f"（{m['reason']}）" if m.get("reason") and m["status"] in (BLOCKED, MANUAL) else ""
         print(f"- {m['id']} [{m['status']} {ago(m.get('status_since'))}] {m['title']}{reason}  "
-              f"repo={Path(m['repo']).name} space={task_space(m)}")
+              f"repo={Path(m['repo']).name} space={task_space(m)}{'（秘書の横に表示中）' if m.get('shown') else ''}")
     return 0
 
 
@@ -1176,7 +1199,10 @@ def cmd_reply(args) -> int:
     if not meta.get("pane"):
         print("まだ起動していません。", file=sys.stderr)
         return 1
-    herdr = Herdr(load_config())
+    cfg = load_config()
+    auto_bring(args.id, cfg)
+    meta = read_meta(args.id)
+    herdr = Herdr(cfg)
     if not args.force:
         typing = None
         with contextlib.suppress(Exception):
@@ -1315,7 +1341,10 @@ def cmd_choose(args) -> int:
         if not text:
             print("--text が空です。", file=sys.stderr)
             return 2
-    herdr = Herdr(load_config())
+    cfg = load_config()
+    auto_bring(args.id, cfg)
+    meta = read_meta(args.id)
+    herdr = Herdr(cfg)
     name = agent_name(meta)
     try:
         if herdr.agent_statuses().get(name) not in ("blocked", None):
@@ -1444,6 +1473,152 @@ def cmd_handback(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# 秘書の横に表示する
+# ---------------------------------------------------------------------------
+#
+# 人間が話題にしているタスクのペインを 1 つだけ、秘書のタブに並べる。別のタスクの話になったら、
+# 前のペインはそのタスクの space に新しいタブとして戻す。ペインは中の Claude Code ごと動き、止まらない。
+
+class BringError(RuntimeError):
+    pass
+
+
+def place_task(meta: dict, move: dict) -> None:
+    """pane move の結果で、タスクのペイン・タブ・ワークスペースを書き直す。"""
+    pane = move.get("pane") or {}
+    new, old = pane.get("pane_id"), meta.get("pane")
+    if new and new != old:
+        meta["pane_aliases"] = [*dict.fromkeys([*meta.get("pane_aliases", []), old])][-10:]
+        meta["pane"] = new
+    meta["tab"] = pane.get("tab_id", meta.get("tab"))
+    meta["workspace"] = pane.get("workspace_id", meta.get("workspace"))
+
+
+def return_to_space(meta: dict, herdr: Herdr, panes: dict[str, dict]) -> str:
+    """秘書の横に表示しているタスクを、その space に新しいタブとして戻す。space がもうなければ作る。"""
+    info = panes.get(meta.get("pane"))
+    shown_tab = (meta.get("shown") or {}).get("tab")
+    if info is None:
+        meta.pop("shown", None)
+        return f"{meta['id']} のペインはもうありません"
+    if info.get("tab_id") != shown_tab:
+        # 人間が別の場所へ動かした。そこに置いたままにする
+        meta.pop("shown", None)
+        place_task(meta, {"pane": info})
+        return f"{meta['id']} は秘書の横から動かされていたので、そのままにしました"
+    move = None
+    workspace = herdr.space_workspace(meta)
+    if workspace:
+        try:
+            move = herdr.move_pane(meta["pane"], "--new-tab", "--workspace", workspace, "--label", tab_label(meta))
+        except HerdrError as e:
+            if e.code != "workspace_not_found":
+                raise
+    if move is None:
+        move = herdr.move_pane(meta["pane"], "--new-workspace", "--label", task_space(meta),
+                               "--tab-label", tab_label(meta))
+    place_task(meta, move)
+    meta.pop("shown", None)
+    return f"{meta['id']} は space「{task_space(meta)}」に戻しました"
+
+
+def show_beside(meta: dict, herdr: Herdr, me: dict, cfg: dict) -> None:
+    split = cfg.get("bring_split") if cfg.get("bring_split") in ("right", "down") else "right"
+    move = herdr.move_pane(meta["pane"], "--tab", me["tab_id"], "--split", split, "--target-pane", me["pane_id"])
+    if not move.get("changed", True) and move.get("reason") == "zoomed_tab":
+        raise BringError("秘書のタブかタスクのタブがズーム中なので並べられません。ズームを解いてから、もう一度 bring してください")
+    place_task(meta, move)
+    meta["shown"] = {"tab": me["tab_id"], "since": now_iso()}
+
+
+def bring(task_id: str | None, cfg: dict, quiet: bool = False) -> tuple[list[str], list[str]]:
+    """task_id のペインを秘書の横に表示し、それまで表示していたタスクを space に戻す。
+    task_id が None なら戻すだけ。(伝えること, うまくいかなかったこと) を返す。"""
+    if task_id is not None and not (task_dir(task_id) / "meta.json").exists():
+        return [], [f"{task_id} というタスクはありません"]
+    herdr = Herdr(cfg)
+    done: list[str] = []
+    with locked():
+        try:
+            me = herdr.current_pane()
+            if me is None:
+                return [], ["秘書が herdr のペインの外で動いているので、タスクのペインを横に並べられません"]
+            panes = herdr.panes()
+        except HerdrError as e:
+            return [], [f"herdr からペインの場所を取れませんでした（{e}）"]
+        target = read_meta(task_id) if task_id else None
+        if target is not None:
+            if target["status"] == CLOSED:
+                return [], [f"{task_id} は閉じています"]
+            if target.get("pane") not in panes:
+                return [], [f"{task_id} のペインがありません（{'まだ起動していません' if not target.get('pane') else 'ペインが閉じられています'}）"]
+            if target.get("shown") and panes[target["pane"]].get("tab_id") == me["tab_id"]:
+                return ([] if quiet else [f"{task_id} はもう秘書の横に表示しています"]), []
+        for m in all_metas():
+            if not m.get("shown") or (target is not None and m["id"] == target["id"]):
+                continue
+            try:
+                done.append(return_to_space(m, herdr, panes))
+            except HerdrError as e:
+                return done, [f"{m['id']} を space に戻せなかったので、{task_id or ''} は並べていません（{e}）"
+                              if target else f"{m['id']} を space に戻せませんでした（{e}）"]
+            finally:
+                write_meta(m)
+        if target is None:
+            return done or ["秘書の横に表示しているタスクはありません"], []
+        target.pop("shown", None)
+        try:
+            show_beside(target, herdr, me, cfg)
+        except (HerdrError, BringError) as e:
+            return done, [f"{task_id} を秘書の横に並べられませんでした（{e}）"]
+        finally:
+            write_meta(target)
+    return [f"{task_id} を秘書の横に表示しました", *done], []
+
+
+def auto_bring(task_id: str, cfg: dict) -> None:
+    """人間がタスクに返事をしたり依頼したりしたら、そのタスクを秘書の横に出す。秘書が herdr の外なら何もしない。"""
+    if not cfg.get("auto_bring", True) or not os.environ.get("HERDR_PANE_ID"):
+        return
+    done, failed = bring(task_id, cfg, quiet=True)
+    if done or failed:
+        print("。".join(done + failed) + "。")
+
+
+def cmd_bring(args) -> int:
+    if (args.id is None) == (not args.back):
+        print("タスク ID か --back のどちらか一方を指定してください。", file=sys.stderr)
+        return 2
+    done, failed = bring(args.id, load_config())
+    if done:
+        print("。".join(done) + "。")
+    for f in failed:
+        print(f"{f}。", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def close_shown(task_id: str, herdr: Herdr, keep: bool) -> str:
+    """秘書の横に表示しているタスクを閉じるとき。秘書のタブは閉じず、タスクのペインだけを閉じる。
+    --keep-tab なら、ペインを space に戻して残す。"""
+    with locked():
+        meta = read_meta(task_id)
+        try:
+            panes = herdr.panes()
+            if meta.get("pane") not in panes:
+                meta.pop("shown", None)
+                return "ペインはもうありません"
+            if keep:
+                return f"{return_to_space(meta, herdr, panes)}。タブは残しています"
+            herdr.close_pane(meta["pane"])
+            meta.pop("shown", None)
+            return f"秘書の横に表示していたペイン {meta['pane']} を閉じました"
+        except HerdrError as e:
+            return f"秘書の横のペインを閉じられませんでした（{e}）"
+        finally:
+            write_meta(meta)
+
+
 def close_task_tab(meta: dict, herdr: Herdr) -> str:
     """タスクのタブを閉じる。space に残るのがこのタブだけで、同じ space に閉じていないタスクもなければ、
     space（ワークスペース）ごと閉じる。人間が足したタブや --keep-tab で残したタブがあれば space は残す。"""
@@ -1469,7 +1644,9 @@ def cmd_close(args) -> int:
         write_meta(meta)
         lines = fill_slots(cfg, herdr)
     tab_note = "タブは残しています"
-    if meta.get("tab") and not args.keep_tab:
+    if meta.get("shown"):
+        tab_note = close_shown(args.id, herdr, keep=args.keep_tab)
+    elif meta.get("tab") and not args.keep_tab:
         try:
             if meta.get("pane") in herdr.pane_ids():
                 tab_note = close_task_tab(meta, herdr)
@@ -1635,7 +1812,8 @@ def hook_task_id() -> str | None:
     pane = os.environ.get("HERDR_PANE_ID")
     if not pane:
         return None
-    owners = [m for m in all_metas() if m.get("pane") == pane and m["status"] != CLOSED]
+    # ペインを別のワークスペースに動かすと ID が変わるが、中のプロセスの HERDR_PANE_ID は起動したときのまま
+    owners = [m for m in all_metas() if pane in (m.get("pane"), *m.get("pane_aliases", [])) and m["status"] != CLOSED]
     return max(owners, key=lambda m: parse_iso(m.get("started_at")))["id"] if owners else None
 
 
@@ -2013,6 +2191,11 @@ def main(argv=None) -> int:
     s.add_argument("number", type=int, nargs="?", help="選択肢の番号（1 から）")
     s.add_argument("--text", help="選択肢にない答え。「Type something.」に打ち込んで送る")
     s.set_defaults(func=cmd_choose)
+
+    s = sub.add_parser("bring", help="タスクのペインを秘書の横に表示し、前に表示していたタスクを space に戻す")
+    s.add_argument("id", nargs="?")
+    s.add_argument("--back", action="store_true", help="表示しているタスクを space に戻すだけ")
+    s.set_defaults(func=cmd_bring)
 
     s = sub.add_parser("cleanup")
     s.add_argument("id")
