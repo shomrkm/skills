@@ -30,21 +30,21 @@ python3 <このリポジトリ>/skills/herdr-secretary/scripts/secretary.py init
 
 `worker-settings.json` は作業エージェントの起動時に `--settings` で渡す。普段使っている Claude Code の設定には触らない。hook の向き先が変わったときなどは、`init` をやり直してよい。`sec allow` で足した許可リストは残る。
 
-`.claude/` 配下の Edit / Write は Claude Code の保護パスで、`allow` や `acceptEdits` があっても確認される。PreToolUse hook の `permissionDecision: "allow"` でも確認は消えない。PermissionRequest hook が `decision.behavior: "allow"` を返したときだけ確認なしで通るので、作業エージェントの hook（`sec hook`）は、タスクの worktree の置き場（`worktrees/`、repos.md の `（worktrees: ...）`、`<repo>/.claude/worktrees/`）の中の `.claude/skills/`・`.claude/commands/`・`.claude/agents/` への Edit / Write だけを許可する。`.claude/settings.json` など、作業エージェントが自分の権限を広げられるものは許可しない。
+`.claude/` 配下の Edit / Write は Claude Code の保護パスで、`allow` や `acceptEdits` があっても確認される。PreToolUse hook の `permissionDecision: "allow"` でも確認は消えない。確認なしで通るのは、PermissionRequest hook が `decision.behavior: "allow"` を返したときだけだ。そこで作業エージェントの hook（`sec hook`）は、タスクの worktree にある `.claude/skills/`・`.claude/commands/`・`.claude/agents/` への Edit / Write だけを許可する。worktree の置き場は、`worktrees/`、repos.md の `（worktrees: ...）`、`<repo>/.claude/worktrees/` の 3 つだ。`.claude/settings.json` など、作業エージェントが自分の権限を広げられるものは許可しない。
 
-### スキルの更新を反映する
+### スキルを更新したとき
 
-hook は、`init` を実行したこのリポジトリの `scripts/secretary.py` を直接読む。PR をマージしただけでは手元のファイルは変わらないので、**マージしたら手元で `git pull` する**。pull すれば、動いている作業エージェントの hook にもすぐ効く。監視ループの `sec watch` は、`sec follow` が裏で起動し、起動したときのコードで動き続ける。そのため、pull したら `kill $(cat ~/secretary/.watch.pid)` で止める。動いている `sec follow` が 10 秒ほどで新しいコードで起動し直す。
+hook は、`init` を実行したこのリポジトリの `scripts/secretary.py` を直接読む。PR をマージしただけでは手元のファイルは変わらないので、**マージしたら手元で `git pull` する**。pull すれば、動いている作業エージェントの hook にもすぐ効く。監視ループの `sec watch` は、`sec follow` が裏で起動し、起動したときのコードで動き続ける。そのため、pull したら `kill $(cat ~/secretary/.watch.pid)` で止める。動いている `sec follow` が、10 秒ほどで監視ループを新しいコードで起動し直す。
 
 監視ループは秘書のセッションから切り離して動き、秘書を終えても止まらない。止めたいときも `kill $(cat ~/secretary/.watch.pid)` する。`sec follow` が動いていれば起動し直されるので、先に秘書のセッションを終える。出力は `~/secretary/watch.log`、エラーは `~/secretary/watch.err` に残る。
 
 `sec watch` は起動時に upstream を fetch し、手元が遅れていれば `[secretary] スキルのリポジトリ（...）が upstream より N コミット遅れています` と知らせる。hook が別の場所のスクリプトを呼んでいるときも知らせる。`sec doctor` でも同じことを確かめられる。止めたいときは config.json の `update_check` を `false` にする。
 
-## 2. 秘書用ディレクトリで Claude Code を起動する
+## 2. 秘書の起動
 
-herdr のペインで `~/secretary` に移動して `claude` を起動する。このスキルが読み込まれるようにしておく（`~/.claude/skills/herdr-secretary` にシンボリックリンクを張るなど）。
+herdr のペインで `~/secretary` に移動して `claude` を起動する。このスキルが読み込まれるようにしておく。たとえば `~/.claude/skills/herdr-secretary` にシンボリックリンクを張る。
 
-秘書には `~/secretary/bin/sec` の実行を許可しておく（`.claude/settings.json` の `permissions.allow` に `Bash(~/secretary/bin/sec:*)` を入れる）。
+秘書には `~/secretary/bin/sec` の実行を許可しておく。`.claude/settings.json` の `permissions.allow` に `Bash(~/secretary/bin/sec:*)` を入れる。
 
 ## 3. herdr との連携
 
@@ -53,8 +53,8 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 | やること | コマンド |
 |---|---|
 | space を探す | `herdr workspace list`（同じ space の閉じていないタスクがいるワークスペース、なければ `label` が space 名のもの） |
-| space にタブを足す（フォーカスは移さない） | `herdr tab create --workspace <ws> --cwd <repo> --label <id 名前> --no-focus --env SECRETARY_TASK_ID=<id> --env SECRETARY_HOME=<home>` → `.result.root_pane.pane_id` |
-| space を作る（space がなかったとき） | `herdr workspace create --cwd <repo> --label <space> --no-focus --env ...` → `.result.workspace` / `.result.tab` / `.result.root_pane`。最初のタブをそのタスクのタブにし、`herdr tab rename <tab> <id 名前>` |
+| space にタブを足す（フォーカスは移さない） | `herdr tab create --workspace <ws> --cwd <repo> --label <id 名前> --no-focus --env SECRETARY_TASK_ID=<id> --env SECRETARY_HOME=<home>`。返り値の `.result.root_pane.pane_id` を使う |
+| space を作る（space がなかったとき） | `herdr workspace create --cwd <repo> --label <space> --no-focus --env ...`。返り値の `.result.workspace` / `.result.tab` / `.result.root_pane` を使う。最初のタブをそのタスクのタブにし、`herdr tab rename <tab> <id 名前>` |
 | 伝言を送る（`sec send`） | `herdr agent prompt <宛先の agent> "[secretary] <送り手 ID> からの伝言 ..."` |
 | Claude Code を起動 | `herdr agent start <agent> --kind claude --pane <pane> --timeout 60000 -- --settings <worker-settings.json>` |
 | 最初の指示・`sec reply` | `herdr agent prompt <agent> "[secretary] ..."` |
@@ -67,7 +67,7 @@ herdr のペインで `~/secretary` に移動して `claude` を起動する。�
 | タブを閉じる（`sec close` / `sec cleanup`） | `herdr tab close <tab>`。space に残るのがそのタブだけで、同じ space に閉じていないタスクもなければ `herdr workspace close <ws>`（`herdr tab list --workspace <ws>` で確かめる） |
 | 版とサーバーの確認（`sec doctor`） | `herdr --version` / `herdr status --json`（`server.compatible`、`restart_needed`） |
 
-hook が届かないと（スクリプトが古い、hook の向き先が違う、など）、許可待ちや作業の終了に気づけず、running のまま「30 分イベントなし」「コマンドが 120 分終わらない」に見える。そこで、無反応と判定する前に `herdr agent list` の `agent_status` を見る。`working` なら判定しない。`blocked` なら「許可待ちか選択待ち」、`idle` / `done` なら「入力待ち」（result.md があれば review）として、`hook が届いていない可能性` を添えて知らせる。この判定は、`snapshot_interval_sec` ごとに回る snapshot の周にだけする。
+スクリプトが古い、hook の向き先が違うなどの理由で hook が届かないと、秘書は許可待ちや作業の終了に気づけない。タスクは running のままで、「30 分イベントなし」「コマンドが 120 分終わらない」に見える。そこで、無反応と判定する前に `herdr agent list` の `agent_status` を見る。`working` なら判定しない。`blocked` なら「許可待ちか選択待ち」、`idle` / `done` なら「入力待ち」（result.md があれば review）として、`hook が届いていない可能性` を添えて知らせる。この判定は、`snapshot_interval_sec` ごとに回る snapshot の周にだけする。
 
 `sec choose` は、直前のツールが AskUserQuestion で、herdr から見て `blocked` のときだけ動く。許可ダイアログも番号付きの選択肢なので、取り違えて秘書が許可しないようにしている。
 
@@ -80,24 +80,24 @@ herdr のエラーは次のように扱う。
 - `agent_pane_busy` は、作ったばかりのタブでシェルの準備がまだできていない。数秒だけ再試行する
 - `agent_not_ready` は、フォルダを信頼するかなどの、起動時の確認で止まっている。blocked として知らせる。人間がペインで答えたら `sec retry` で最初の指示を送り直す
 - `workspace_not_found` は、space のワークスペースが一覧を取った後に閉じられた。space を作り直してそこにタブを置く
-
-herdr は Claude Code の起動直後の画面（初回の案内など）を「入力待ち」と判定することがある。その場合、最初の指示はその画面に吸い込まれる。そのため、最初の指示が hook（UserPromptSubmit）で届いたことを 30 秒以内に確認できなければ、blocked として知らせる。Enter を自動で送り直すことはしない（フォルダの信頼確認は、既定の選択肢が「No, exit」）。
 - `agent_blocked` は、許可や選択肢のダイアログが出ている。`sec reply` は送らない。選択式の質問なら `sec choose`、許可ダイアログならペインで答えるよう案内する
 - `protocol_mismatch` は、herdr を上げたあとも、サーバーが古いままになっている。サーバーの再起動が要る。0. を参照する
 
-UserPromptSubmit が来たら、prompt の先頭で送り手を見分ける。`[secretary]` は秘書、`<task-notification>` は Claude Code 自身（バックグラウンドのサブエージェントやコマンドの完了通知）、それ以外は人間の直接指示として manual にする。許可ダイアログや選択式の質問（AskUserQuestion）にペインで答えても UserPromptSubmit は来ない（PostToolUse で running に戻る）。
+herdr は、Claude Code の起動直後に出る初回の案内などの画面を「入力待ち」と判定することがある。その場合、最初の指示はその画面に送られて消える。そこで監視ループは、最初の指示が hook（UserPromptSubmit）で届いたことを 30 秒以内に確かめられなければ、画面を見る。指示が入力欄に残っていれば、Enter を 1 回だけ送り直す。入力欄が見えなければ、Enter は送らずに blocked として知らせる。フォルダの信頼確認では、既定の選択肢が「No, exit」のことがあるからだ。
 
-herdr のバージョンを上げて動かなくなったら、`herdr agent` と `herdr tab` のヘルプを見て `Herdr` クラスを直す。
+UserPromptSubmit が来たら、prompt の先頭で送り手を見分ける。`[secretary]` は秘書、`<task-notification>` は Claude Code 自身（バックグラウンドのサブエージェントやコマンドの完了通知）、それ以外は人間の直接指示として manual にする。許可ダイアログや選択式の質問（AskUserQuestion）にペインで答えても、UserPromptSubmit は来ない。この場合は PostToolUse でタスクが running に戻る。
+
+herdr の版を上げて動かなくなったら、`herdr agent`・`herdr tab`・`herdr pane` のヘルプを見て `Herdr` クラスを直す。
 
 ## 4. 動作確認
 
-偽の herdr（herdr 0.9.5 と同じ引数・同じ JSON を返す）を使ったテストがある。
+偽の herdr を使ったテストがある。偽の herdr は、herdr 0.9.5 と同じ引数を受け付け、同じ形の JSON を返す。テストは bash の構文を使うので、`bash` で動かす。
 
 ```bash
-sh skills/herdr-secretary/tests/test_flow.sh
+bash skills/herdr-secretary/tests/test_flow.sh
 ```
 
-本物の Claude Code で、hook から review までの流れを確かめるテストもある（`claude -p` を 1 回呼ぶ）。
+本物の Claude Code で、hook から review までの流れを確かめるテストもある。このテストは `claude -p` を 1 回呼ぶ。
 
 ```bash
 sh skills/herdr-secretary/tests/test_real_hooks.sh
