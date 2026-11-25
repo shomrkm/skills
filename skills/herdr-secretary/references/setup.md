@@ -20,8 +20,8 @@ python3 <このリポジトリ>/skills/herdr-secretary/scripts/secretary.py init
 | `bin/sec` | CLI のラッパー |
 | `config.json` | 並列上限などの設定 |
 | `repos.md` | 作業対象のリポジトリ一覧。**自分で書く** |
-| `worker-settings.json` | 作業エージェント専用の設定。hook、タスクフォルダへの書き込み許可、ファイル編集の自動承認（`acceptEdits`）が入っている。Bash などの許可はここに足していく |
-| `tasks/` | タスクフォルダ |
+| `worker-settings.json` | 作業エージェント専用の設定。hook、タスクフォルダへの書き込み許可、ファイル編集の自動承認（`acceptEdits`）、`sec send`・`sec peers`・`sec note` の許可が入っている。Bash などの許可はここに足していく |
+| `tasks/` | タスクフォルダ。`<id>/` の下に prompt.md・meta.json・status.tsv（進み具合のログ）・result.md が入る |
 | `worktrees/` | リポジトリに作業場所のルールがないときの worktree 置き場。作業エージェントは確認なしで触れる |
 | `events.jsonl` | hook が書くイベントのログ |
 | `permissions.jsonl` | 許可待ちになったコマンドの記録（`sec permissions` で集計） |
