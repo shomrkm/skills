@@ -5,7 +5,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SEC="python3 $HERE/../scripts/secretary.py"
 TMP=$(cd "$(mktemp -d)" && pwd -P)
 # herdr のペインの中（作業エージェント自身など）で走らせても、そのペインやタスクを触らない
-unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID SECRETARY_TASK_ID
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID SECRETARY_TASK_ID HC_TERMINAL_ID
 export SECRETARY_HOME="$TMP/home" HERDR_BIN="$HERE/fake_herdr.py" FAKE_HERDR_STATE="$TMP/herdr.json"
 REPO="$TMP/repo"; mkdir -p "$REPO"
 git -C "$REPO" init -q
@@ -728,7 +728,8 @@ expect "通知を止めていた間（[0-9:]*〜[0-9:]*）の変化 2 件: t005 
 out=$(watch); [ -z "$out" ] || fail "まとめを 2 回出した: $out"
 
 # follow は裏の監視ループの出力を、まだ出していない行から出す（Monitor が切れても取りこぼさない）
-sleep 60 & SLEEP=$!
+# 生死確認はコマンドも見るので、監視ループと同じ引数で眠るだけのプロセスを置く
+python3 -c 'import time; time.sleep(60)' secretary.py watch & SLEEP=$!
 echo $SLEEP > "$SECRETARY_HOME/.watch.pid"
 printf '[secretary] a\n' > "$SECRETARY_HOME/watch.log"
 echo 0 > "$SECRETARY_HOME/.follow-offset"
@@ -736,18 +737,31 @@ echo 0 > "$SECRETARY_HOME/.follow-offset"
 printf '[secretary] b\n[secretary] c\n' >> "$SECRETARY_HOME/watch.log"
 [ "$($SEC follow --once)" = "$(printf '[secretary] b\n[secretary] c')" ] || fail "follow が続きから出していない"
 kill $SLEEP
-# 監視ループが動いていなければ、切り離して起動する
+# 監視ループが終わっていれば、切り離して起動し直す。.watch.pid に残った pid が回収されていないプロセス（ゾンビ）で、
+# kill -0 が成功しても、終わったものとして扱う
 python3 - <<PY
 import json; p="$SECRETARY_HOME/config.json"; c=json.load(open(p)); c["update_check"]=False; json.dump(c,open(p,"w"))
 PY
+rm -f "$SECRETARY_HOME/.watch.pid"
+python3 -c '
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+open(sys.argv[1], "w").write(str(pid))
+time.sleep(60)' "$SECRETARY_HOME/.watch.pid" & ZPARENT=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$SECRETARY_HOME/.watch.pid" ] && break; sleep 0.2; done
+ZOMBIE=$(cat "$SECRETARY_HOME/.watch.pid")
+sleep 0.5
+kill -0 "$ZOMBIE" 2>/dev/null || fail "ゾンビを作れていない（テストの前提）"
 $SEC follow --once > "$TMP/follow.out" & FOLLOW=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   WPID=$(cat "$SECRETARY_HOME/.watch.pid" 2>/dev/null || true)
-  [ -n "$WPID" ] && [ "$WPID" != "$SLEEP" ] && kill -0 "$WPID" 2>/dev/null && break
+  [ -n "$WPID" ] && [ "$WPID" != "$ZOMBIE" ] && kill -0 "$WPID" 2>/dev/null && break
   sleep 0.5
 done
-kill $FOLLOW 2>/dev/null || true
-[ "$WPID" != "$SLEEP" ] && kill -0 "$WPID" 2>/dev/null || fail "follow が監視ループを起動していない"
+kill $FOLLOW $ZPARENT 2>/dev/null || true
+[ "$WPID" != "$ZOMBIE" ] && kill -0 "$WPID" 2>/dev/null || fail "ゾンビの pid が残っていると、follow が監視ループを起動し直さない"
 kill "$WPID"
 grep -q "follow" "$SECRETARY_HOME/CLAUDE.md" || fail "秘書の CLAUDE.md が sec follow を使っていない"
 

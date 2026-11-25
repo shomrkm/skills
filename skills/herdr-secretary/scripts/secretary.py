@@ -83,6 +83,8 @@ DEFAULT_CONFIG = {
     "long_tool_alert_min": 120,
     "manual_timeout_min": 15,
     "first_prompt_ack_sec": 30,
+    # デスクトップ版で、タブを作ってから Claude Code が動き出すまで待つ秒数
+    "desktop_start_timeout_sec": 60,
     # この時間帯は通知を出さず、明けたら溜まった変化を 1 行にまとめて出す。"" で無効
     "quiet_hours": "18:00-09:00",
     "review_backlog_alert": 5,
@@ -90,7 +92,11 @@ DEFAULT_CONFIG = {
     "update_check": True,
     "notify": "auto",
     "poll_interval_sec": 1.0,
+    # herdr（ターミナル版）か desktop（デスクトップアプリ）か。auto は sec を呼んだペインの環境変数で決める
+    "backend": "auto",
     "herdr_bin": "herdr",
+    "herdr_app_bin": "herdr-app",
+    "hc_bin": "hc",
     # 人間が話題にしたタスクのペインを、秘書のペインの横に並べる。並べる向きは right か down
     "auto_bring": True,
     "bring_split": "right",
@@ -309,7 +315,9 @@ def apply_event(meta: dict, ev: dict, cfg: dict | None = None) -> str | None:
     if name == "UserPromptSubmit":
         if ev.get("from_secretary"):
             meta.pop("awaiting_ack_since", None)
-            meta.pop("pending_first_prompt", None)
+            if meta.pop("pending_first_prompt", None) and status == BLOCKED:
+                # 起動画面を人間が進めたあと、デスクトップ版はアプリが最初の指示を送る。retry は要らない
+                return transition(meta, RUNNING, "最初の指示が届いた")
             return None
         if ev.get("from_system"):
             return transition(meta, RUNNING, "バックグラウンド処理の完了で再開") if status == BLOCKED else None
@@ -454,7 +462,7 @@ def record_permission(task_id: str, tool: dict) -> None:
 HOOK_MISSING = "hook が届いていない可能性。sec doctor で確認"
 
 
-def first_prompt_not_acked(meta: dict, herdr: "Herdr | None") -> str | None:
+def first_prompt_not_acked(meta: dict, herdr: "Backend | None") -> str | None:
     """最初の指示が届いていない。入力欄に残っているだけなら Enter を 1 回送り直す。
 
     入力欄が見えなければ、起動直後の画面（初回の案内やフォルダの信頼確認）に吸い込まれた可能性が高い。
@@ -463,11 +471,11 @@ def first_prompt_not_acked(meta: dict, herdr: "Herdr | None") -> str | None:
     text = None
     if herdr:
         with contextlib.suppress(Exception):
-            text = herdr.input_text(agent_name(meta))
+            text = herdr.input_text(worker_addr(meta))
     if text and SECRETARY_MARK in text:
         if not meta.get("first_prompt_resent"):
             with contextlib.suppress(Exception):
-                herdr.send_keys(agent_name(meta), "enter")
+                herdr.send_keys(worker_addr(meta), "enter")
                 meta["first_prompt_resent"] = True
                 meta["awaiting_ack_since"] = now_iso()
                 return None
@@ -478,7 +486,7 @@ def first_prompt_not_acked(meta: dict, herdr: "Herdr | None") -> str | None:
 
 
 def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], dict[str, str]] | None,
-                    check_silence: bool = True, herdr: "Herdr | None" = None) -> str | None:
+                    check_silence: bool = True, herdr: "Backend | None" = None) -> str | None:
     """イベントでは拾えない異常（ペイン消失・長時間無反応・manual の放置）を見る。
 
     check_silence が False のときは無反応の判定をしない（herdr の状態と突き合わせられる snapshot の周だけ判定する）。"""
@@ -497,7 +505,7 @@ def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], dict[str, str]]
                 return None  # 一度知らせたら繰り返さない
             meta["pane_gone"] = True
             return transition(meta, BLOCKED, "異常: ペインが見つからない")
-        if agent_name(meta) not in agents and not meta.get("agent_gone"):
+        if worker_addr(meta) not in agents and not meta.get("agent_gone"):
             # Claude Code が終了した（/exit、確認画面で No、クラッシュなど）。ペインはシェルに戻っている
             meta["agent_gone"] = True
             return transition(meta, BLOCKED, "異常: 作業エージェントが終了した（retry で起動し直せる）")
@@ -523,7 +531,7 @@ def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], dict[str, str]]
             since = parse_iso(meta.get("last_event_at") or meta.get("started_at"))
             msg = f"異常: {limit} 分イベントなし"
         if limit and since and now - since > limit * 60:
-            agent_status = live[1].get(agent_name(meta)) if live else None
+            agent_status = live[1].get(worker_addr(meta)) if live else None
             if agent_status == "working":
                 return None  # herdr から見て動いている。次の snapshot でまた見る
             meta["silence_alerted"] = True
@@ -541,12 +549,37 @@ def periodic_checks(meta: dict, cfg: dict, live: tuple[set[str], dict[str, str]]
 # ---------------------------------------------------------------------------
 # herdr アダプタ
 #
-# herdr を呼ぶのはここだけ。herdr 0.9.5 のソース（src/cli, src/api/schema）と
-# 公式 agent skill（skills/herdr/SKILL.md）に合わせてある。
-# - 制御コマンドは JSON（{"id", "result": {...}}）を返す
-# - サーバーのエラーは stderr に JSON（{"error": {"code", "message"}}）、終了コード 1
-# - herdr のペインの中（HERDR_ENV=1）から呼ぶと、そのセッションを操作する
+# herdr を呼ぶのはここだけ。herdr には別々の CLI を持つ 2 つの版がある。
+# - ターミナル版（Herdr）: `herdr` コマンド。herdr 0.9.5 のソース（src/cli, src/api/schema）と
+#   公式 agent skill（skills/herdr/SKILL.md）に合わせてある
+# - デスクトップ版（HerdrApp）: 画面（space・タブ・ペイン）は `herdr-app`、端末の中身は herdr-core の `hc`
+#   で操作する。`herdr-app --skill` と `hc --skill` に合わせてある
+# どちらで動かすかはタスクを登録したときに決めて meta.json の backend に残し、以後はそのタスクの版で操作する。
 # ---------------------------------------------------------------------------
+
+TERMINAL = "herdr"
+DESKTOP = "desktop"
+BACKENDS = (TERMINAL, DESKTOP)
+
+
+def backend_kind(cfg: dict) -> str:
+    """sec を呼んだペインがどちらの herdr の中か。ターミナル版の中は HERDR_ENV、デスクトップ版の中は
+    HC_TERMINAL_ID が付く。デスクトップ版の端末の中でターミナル版を動かしていれば、内側のターミナル版を使う。"""
+    if cfg.get("backend") in BACKENDS:
+        return cfg["backend"]
+    if os.environ.get("HERDR_ENV"):
+        return TERMINAL
+    if os.environ.get("HC_TERMINAL_ID"):
+        return DESKTOP
+    return TERMINAL
+
+
+def make_backend(cfg: dict, kind: str | None = None) -> "Backend":
+    return HerdrApp(cfg) if (kind or backend_kind(cfg)) == DESKTOP else Herdr(cfg)
+
+
+def backend_for(meta: dict, cfg: dict) -> "Backend":
+    return make_backend(cfg, task_backend(meta))
 
 def trust_dirs(settings: dict, dirs: list[Path]) -> None:
     """作業エージェントが確認なしで触れるディレクトリを、worker-settings の additionalDirectories と許可リストに足す。
@@ -585,6 +618,16 @@ def agent_name(meta: dict) -> str:
     """herdr のエージェント名。閉じたタスクのエージェントや別の秘書ディレクトリと衝突しないよう、
     タスク ID に秘書ディレクトリごとの短い識別子を付ける（[a-z][a-z0-9_-]{0,31}）。"""
     return meta.get("agent") or f"{meta['id']}-{home_tag()}"
+
+
+def task_backend(meta: dict) -> str:
+    """タスクを動かしている herdr。このスキルがデスクトップ版に対応する前に起動したタスクはターミナル版。"""
+    return meta.get("backend") or TERMINAL
+
+
+def worker_addr(meta: dict) -> str:
+    """作業エージェントの宛先。ターミナル版はエージェント名、デスクトップ版は hc の端末 ID（t7 など）。"""
+    return (meta.get("terminal") or "") if task_backend(meta) == DESKTOP else agent_name(meta)
 
 
 TAB_NAME_MAX = 24
@@ -690,7 +733,37 @@ RESTART_SERVER_HINT = ("herdr のサーバーを再起動してください。�
                        "人間が作業を区切ってから `herdr server stop` を実行し、`herdr` で起動し直します。秘書からは実行しません")
 
 
-class Herdr:
+class Backend:
+    """2 つの版で共通の処理。版ごとの操作は Herdr と HerdrApp が実装する。"""
+    kind = ""
+    # タスクのペインを秘書のタブに動かせるか（sec bring）
+    can_move_panes = False
+
+    def pane_ids(self) -> set[str]:
+        return set(self.panes())
+
+    def agent_names(self) -> set[str]:
+        return set(self.agent_statuses())
+
+    def live(self) -> tuple[set[str], dict[str, str]]:
+        return self.pane_ids(), self.agent_statuses()
+
+    def space_workspace(self, meta: dict) -> str | None:
+        """タスクの space にあたるワークスペース。同じ space のタスクがいるワークスペースを優先し、
+        なければ同じ名前のワークスペースを使う。どちらもなければ None。"""
+        live = self.workspaces()
+        ids = {w["workspace_id"] for w in live}
+        for m in space_peers(meta["id"], task_space(meta)):
+            # 秘書の横に表示しているタスクは、space のワークスペースにいない
+            if task_backend(m) == self.kind and m.get("workspace") in ids and not m.get("shown"):
+                return m["workspace"]
+        return next((w["workspace_id"] for w in live if w.get("label") == task_space(meta)), None)
+
+
+class Herdr(Backend):
+    kind = TERMINAL
+    can_move_panes = True
+
     def __init__(self, cfg: dict):
         self.bin = os.environ.get("HERDR_BIN", cfg.get("herdr_bin", "herdr"))
 
@@ -744,9 +817,6 @@ class Herdr:
     def panes(self) -> dict[str, dict]:
         return {p["pane_id"]: p for p in self._run("pane", "list").get("panes", [])}
 
-    def pane_ids(self) -> set[str]:
-        return set(self.panes())
-
     def current_pane(self) -> dict | None:
         """このコマンドを呼んだペイン（秘書のペイン）。herdr のペインの外なら None。"""
         if not os.environ.get("HERDR_PANE_ID"):
@@ -766,18 +836,13 @@ class Herdr:
         return {a["name"]: a.get("agent_status", "unknown")
                 for a in self._run("agent", "list").get("agents", []) if a.get("name")}
 
-    def agent_names(self) -> set[str]:
-        return set(self.agent_statuses())
-
-    def live(self) -> tuple[set[str], dict[str, str]]:
-        return self.pane_ids(), self.agent_statuses()
-
     def send_keys(self, agent: str, *keys: str) -> None:
         self._run("agent", "send-keys", agent, *keys)
 
-    def send_text(self, pane: str, text: str) -> None:
-        """Enter を押さずに文字だけを打つ。"""
-        self._run("pane", "send-text", pane, text)
+    def submit_text(self, meta: dict, text: str) -> None:
+        """ダイアログの入力欄に文字を打って Enter を押す。"""
+        self._run("pane", "send-text", meta["pane"], text)
+        self.send_keys(worker_addr(meta), "enter")
 
     def input_text(self, agent: str) -> str | None:
         """Claude Code の入力欄に入っている文字。入力欄が見えない（起動画面やダイアログ）なら None。"""
@@ -796,20 +861,9 @@ class Herdr:
     def close_workspace(self, workspace: str) -> None:
         self._run("workspace", "close", workspace)
 
-    def space_workspace(self, meta: dict) -> str | None:
-        """タスクの space にあたる herdr のワークスペース。同じ space のタスクがいるワークスペースを優先し、
-        なければ同じ名前のワークスペースを使う。どちらもなければ None。"""
-        live = self.workspaces()
-        ids = {w["workspace_id"] for w in live}
-        for m in space_peers(meta["id"], task_space(meta)):
-            # 秘書の横に表示しているタスクは、space のワークスペースにいない
-            if m.get("workspace") in ids and not m.get("shown"):
-                return m["workspace"]
-        return next((w["workspace_id"] for w in live if w.get("label") == task_space(meta)), None)
-
-    def start_worker(self, meta: dict, settings: Path) -> str:
-        """タスクの space にタブを作り（フォーカスは移さない）、そのペインで Claude Code を起動する。ペイン ID を返す。
-        space がなければワークスペースを作り、その最初のタブをこのタスクのタブにする。"""
+    def start_worker(self, meta: dict, settings: Path, prompt: str) -> str:
+        """タスクの space にタブを作り（フォーカスは移さない）、そのペインで Claude Code を起動して最初の指示を送る。
+        ペイン ID を返す。space がなければワークスペースを作り、その最初のタブをこのタスクのタブにする。"""
         env = ["--env", f"SECRETARY_TASK_ID={meta['id']}", "--env", f"SECRETARY_HOME={home()}"]
         tab = None
         workspace = self.space_workspace(meta)
@@ -828,7 +882,9 @@ class Herdr:
         meta["workspace"] = workspace
         meta["pane"] = pane
         meta["tab"] = tab.get("tab", {}).get("tab_id")
-        return self.start_agent(meta, settings)
+        self.start_agent(meta, settings)
+        self.prompt(worker_addr(meta), prompt)
+        return pane
 
     def start_agent(self, meta: dict, settings: Path) -> str:
         pane = meta["pane"]
@@ -854,6 +910,172 @@ class Herdr:
         return r.get("read", {}).get("text") or r.get("text") or json.dumps(r, ensure_ascii=False)
 
 
+# hc のエラーの kind を、ターミナル版の herdr と同じエラーコードにそろえる（呼び出し側の分岐を共通にする）
+HC_ERROR_CODES = {"blocked": "agent_blocked", "not_found": "agent_not_found"}
+HC_EXIT_BLOCKED = 9
+CLAUDE_APP = "claude-code"
+
+
+class HerdrApp(Backend):
+    """デスクトップ版の herdr。ターミナル版の herdr とはサーバーも CLI も別で、
+    `herdr` コマンドで作ったタブはデスクトップアプリには出ない。
+
+    - space・タブ・ペインを作る、閉じる、一覧する: `herdr-app do <command> <JSON>` / `herdr-app ls`
+    - 端末を読む、文字やキーを送る、状態を見る: `hc read` / `hc send` / `hc keys` / `hc ls`
+    - 作業エージェントの宛先は hc の端末 ID（t7 など）。ペイン ID とは別物"""
+    kind = DESKTOP
+
+    def __init__(self, cfg: dict):
+        self.app = os.environ.get("HERDR_APP_BIN", cfg.get("herdr_app_bin", "herdr-app"))
+        self.hc = os.environ.get("HC_BIN", cfg.get("hc_bin", "hc"))
+        self.start_timeout = cfg.get("desktop_start_timeout_sec", 60)
+
+    def available(self) -> bool:
+        return shutil.which(self.app) is not None and shutil.which(self.hc) is not None
+
+    def check(self) -> list[str]:
+        missing = [b for b in (self.app, self.hc) if shutil.which(b) is None]
+        if missing:
+            return [f"herdr デスクトップアプリのコマンドが見つかりません（{', '.join(missing)}）。"
+                    "Herdr.app を起動すると ~/.local/bin に herdr-app と hc が入ります"]
+        try:
+            self._app("status")
+        except Exception as e:
+            return [f"herdr デスクトップアプリのウィンドウに接続できません（{e}）。Herdr.app を開いてください"]
+        try:
+            self._hc("server", "status")
+        except Exception as e:
+            return [f"herdr-core（hc）のサーバーに接続できません（{e}）。Herdr.app を開き直してください"]
+        return []
+
+    def _app(self, *args: str, timeout: int = 30) -> dict:
+        r = subprocess.run([self.app, *args], capture_output=True, text=True, timeout=timeout)
+        try:
+            out = json.loads(r.stdout) if r.stdout.strip() else {}
+        except json.JSONDecodeError:
+            out = {}
+        if r.returncode != 0 or (isinstance(out, dict) and out.get("error")):
+            message = (out.get("error") if isinstance(out, dict) else None) or r.stderr.strip() or r.stdout.strip()
+            raise HerdrError("", str(message) or f"herdr-app {' '.join(args)} が終了コード {r.returncode}")
+        return out
+
+    def do(self, command: str, **params) -> dict:
+        """引数は JSON 1 つで渡す（`--argv '[...]'` の引用符の扱いを気にしなくて済む）。"""
+        return self._app("do", command, json.dumps(params, ensure_ascii=False))
+
+    def _hc(self, *args: str, timeout: int = 30, text: bool = False):
+        r = subprocess.run([self.hc, *args], capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            kind, message = "", r.stderr.strip()
+            with contextlib.suppress(Exception):
+                body = json.loads(r.stderr).get("error", {})
+                kind, message = body.get("kind", ""), body.get("message", message)
+            if r.returncode == HC_EXIT_BLOCKED:
+                kind = "blocked"
+            raise HerdrError(HC_ERROR_CODES.get(kind, kind), message or f"hc {' '.join(args)} が終了コード {r.returncode}")
+        if text:
+            return r.stdout
+        try:
+            return json.loads(r.stdout) if r.stdout.strip() else {}
+        except json.JSONDecodeError:
+            return {"text": r.stdout}
+
+    def layout(self) -> list[dict]:
+        return self._app("ls").get("spaces", [])
+
+    def panes(self) -> dict[str, dict]:
+        return {t["pane"]: {"pane_id": t["pane"], "tab_id": tab["id"], "workspace_id": s["id"], "terminal": t["terminal"]}
+                for s in self.layout() for tab in s.get("tabs", []) for t in tab.get("terminals", []) if t.get("pane")}
+
+    def workspaces(self) -> list[dict]:
+        return [{"workspace_id": s["id"], "label": s.get("name")} for s in self.layout()]
+
+    def tab_ids(self, workspace: str) -> set[str]:
+        return {tab["id"] for s in self.layout() if s["id"] == workspace for tab in s.get("tabs", [])}
+
+    def terminals(self) -> list[dict]:
+        return self._hc("ls", "--json").get("terminals", [])
+
+    def agent_statuses(self) -> dict[str, str]:
+        """Claude Code が動いている端末の状態（idle / working / done / blocked / error / unknown）。
+        Claude Code が終わってシェルに戻った端末は含めない。"""
+        return {t["address"]: t.get("status") or "unknown"
+                for t in self.terminals() if t.get("state") == "live" and t.get("agent") == CLAUDE_APP}
+
+    def current_pane(self) -> dict | None:
+        return None
+
+    def send_keys(self, terminal: str, *keys: str) -> None:
+        self._hc("keys", terminal, *keys)
+
+    def submit_text(self, meta: dict, text: str) -> None:
+        """hc には Enter を押さずに文字だけを打つ操作がないので、貼り付けと Enter を hc send でまとめて送る。
+        選択式の質問を出している端末は blocked なので --force が要る。"""
+        self._hc("send", "--force", worker_addr(meta), text)
+
+    def input_text(self, terminal: str) -> str | None:
+        return input_box(self._hc("read", terminal, "--lines", "0", text=True))
+
+    def prompt(self, terminal: str, text: str) -> None:
+        self._hc("send", terminal, text)
+
+    def read(self, terminal: str, lines: int) -> str:
+        text = self._hc("read", terminal, "--lines", str(lines), text=True).rstrip("\n")
+        return "\n".join(text.splitlines()[-lines:])
+
+    def close_pane(self, pane: str) -> None:
+        self.do("pane.close", pane=pane)
+
+    def close_tab(self, tab: str) -> None:
+        self.do("tab.close", id=tab, confirmed=True)
+
+    def close_workspace(self, workspace: str) -> None:
+        self.do("space.close", id=workspace, confirmed=True)
+
+    def peek(self, meta: dict) -> None:
+        """タスクの端末を、いま表示している画面の上に重ねて出す。人間が閉じるかタブに移すまで出ている。"""
+        self.do("terminal.peek", terminal=worker_addr(meta))
+
+    def worker_argv(self, meta: dict, settings: Path) -> list[str]:
+        """デスクトップ版のタブには環境変数を渡す引数がないので、env で包んで渡す。"""
+        return ["env", f"SECRETARY_TASK_ID={meta['id']}", f"SECRETARY_HOME={home()}",
+                "claude", "--settings", str(settings)]
+
+    def start_worker(self, meta: dict, settings: Path, prompt: str) -> str:
+        """タスクの space にタブを作り、Claude Code を起動する。表示している space とタブは切り替えない。
+        最初の指示は、Claude Code が入力を受け付けられるようになったらアプリが送る（task）。"""
+        prepare_worker_settings(meta, settings)
+        spec = {"folder": meta["repo"], "argv": self.worker_argv(meta, settings), "task": prompt, "focus": False}
+        workspace = self.space_workspace(meta)
+        if workspace:
+            made = self.do("tab.new", space=workspace, name=tab_label(meta), **spec)
+        else:
+            made = self.do("space.new", name=task_space(meta), tab=tab_label(meta), **spec)
+        meta["workspace"] = made.get("space")
+        meta["tab"] = made.get("tab")
+        meta["terminal"] = made.get("terminal")
+        meta["pane"] = next((p for p, info in self.panes().items() if info["terminal"] == meta["terminal"]), None)
+        self.wait_for_agent(meta)
+        return meta["pane"]
+
+    def start_agent(self, meta: dict, settings: Path) -> str:
+        """Claude Code が終わってシェルに戻った端末で、もう一度 Claude Code を起動する。"""
+        prepare_worker_settings(meta, settings)
+        self.prompt(worker_addr(meta), shlex.join(self.worker_argv(meta, settings)))
+        self.wait_for_agent(meta)
+        return meta["pane"]
+
+    def wait_for_agent(self, meta: dict) -> None:
+        """端末で Claude Code が動き出すのを待つ。hc wait はシェルのままだと終了まで待ってしまうので、hc ls を見る。"""
+        deadline = time.time() + self.start_timeout
+        while True:
+            if worker_addr(meta) in self.agent_statuses():
+                return
+            if time.time() >= deadline:
+                raise HerdrError("agent_not_ready", f"{self.start_timeout} 秒待っても Claude Code が起動しない")
+            time.sleep(0.5)
+
+
 # ---------------------------------------------------------------------------
 # 起動
 # ---------------------------------------------------------------------------
@@ -862,12 +1084,13 @@ def first_prompt(meta: dict) -> str:
     return f"{SECRETARY_MARK} {task_dir(meta['id']) / 'prompt.md'} を読んで、その指示に従って作業してください。"
 
 
-def launch(meta: dict, herdr: Herdr) -> str | None:
+def launch(meta: dict, herdr: Backend) -> str | None:
     meta["agent"] = agent_name(meta)
+    meta["backend"] = herdr.kind
     meta["started_at"] = now_iso()
     meta["last_event_at"] = meta["started_at"]
     try:
-        herdr.start_worker(meta, home() / "worker-settings.json")
+        herdr.start_worker(meta, home() / "worker-settings.json", first_prompt(meta))
     except HerdrError as e:
         if e.code == "agent_not_ready":
             # 起動時の確認（フォルダの信頼など）で止まっている。人間がペインで答えれば進む
@@ -875,18 +1098,22 @@ def launch(meta: dict, herdr: Herdr) -> str | None:
             return transition(meta, BLOCKED, f"起動時の確認待ち（ペイン {meta.get('pane')} で答えてから retry）")
         raise
     append_status(meta["id"], "start", "作業エージェントを起動した", evidence=f"pane {meta.get('pane')}")
-    send_first_prompt(meta, herdr)
+    awaiting_first_prompt(meta)
     return transition(meta, RUNNING, "起動")
 
 
-def send_first_prompt(meta: dict, herdr: Herdr) -> None:
-    herdr.prompt(agent_name(meta), first_prompt(meta))
+def awaiting_first_prompt(meta: dict) -> None:
     meta["awaiting_ack_since"] = now_iso()
     meta.pop("first_prompt_resent", None)
 
 
-def fill_slots(cfg: dict, herdr: Herdr) -> list[str]:
-    """空きがあればキューの古い順に起動する。"""
+def send_first_prompt(meta: dict, herdr: Backend) -> None:
+    herdr.prompt(worker_addr(meta), first_prompt(meta))
+    awaiting_first_prompt(meta)
+
+
+def fill_slots(cfg: dict) -> list[str]:
+    """空きがあればキューの古い順に、登録したときの herdr で起動する。"""
     lines = []
     metas = all_metas()
     active = sum(1 for m in metas if m["status"] in ACTIVE)
@@ -894,7 +1121,7 @@ def fill_slots(cfg: dict, herdr: Herdr) -> list[str]:
         if active >= cfg["max_parallel"]:
             break
         try:
-            line = launch(m, herdr)
+            line = launch(m, backend_for(m, cfg))
         except Exception as e:  # 起動失敗は人間に知らせる
             hint = "。sec doctor で herdr の版とサーバーを確認" if isinstance(e, HerdrError) else ""
             line = transition(m, BLOCKED, f"異常: 起動に失敗 ({e}){hint}")
@@ -1003,7 +1230,7 @@ def cmd_init(args) -> int:
     print(f"初期化しました: {h}")
     print(f"1. repos.md に作業対象のリポジトリを書いてください: {repos}")
     print(f"2. herdr のペインで `cd {h} && claude` を実行すると、秘書として動き出します")
-    problems = Herdr(load_config()).check()
+    problems = make_backend(load_config()).check()
     if problems:
         print("\nherdr について、起動の前に直すことがあります:")
         for p in problems:
@@ -1153,8 +1380,9 @@ def cmd_new(args) -> int:
         return 2
 
     cfg = load_config()
+    herdr = make_backend(cfg)
     if not args.no_launch:
-        problems = Herdr(cfg).check()
+        problems = herdr.check()
         if problems:
             print("herdr の準備ができていないので登録しませんでした。人間に次のことを頼んでください:", file=sys.stderr)
             for p in problems:
@@ -1176,11 +1404,11 @@ def cmd_new(args) -> int:
             status=status_log(tid), sec=home() / "bin" / "sec", result=d / "result.md", worktree=home() / "worktrees" / tid))
         meta = {"id": tid, "title": args.title, "name": name, "repo": str(repo), "status": QUEUED,
                 "reason": "", "created_at": now_iso(), "status_since": now_iso(), "pane": None,
-                "history": []}
+                "backend": herdr.kind, "history": []}
         # --space がなければ、そのタスクだけの space を作る
         meta["space"] = space or tab_label(meta)
         write_meta(meta)
-        lines = [] if args.no_launch else fill_slots(cfg, Herdr(cfg))
+        lines = [] if args.no_launch else fill_slots(cfg)
     meta = read_meta(tid)
     if meta["status"] == QUEUED:
         print(f"{tid} を登録しました（キュー待ち。並列上限 {cfg['max_parallel']}）")
@@ -1299,7 +1527,7 @@ def cmd_peek(args) -> int:
     lines = min(args.lines, PEEK_MAX_LINES)
     if lines < args.lines:
         print(f"（--lines は {PEEK_MAX_LINES} 行までです。{lines} 行で読みます）", file=sys.stderr)
-    print(Herdr(load_config()).read(agent_name(meta), lines))
+    print(backend_for(meta, load_config()).read(worker_addr(meta), lines))
     return 0
 
 
@@ -1311,18 +1539,18 @@ def cmd_reply(args) -> int:
     cfg = load_config()
     auto_bring(args.id, cfg)
     meta = read_meta(args.id)
-    herdr = Herdr(cfg)
+    herdr = backend_for(meta, cfg)
     if not args.force:
         typing = None
         with contextlib.suppress(Exception):
-            typing = herdr.input_text(agent_name(meta))
+            typing = herdr.input_text(worker_addr(meta))
         if typing:
             # agent prompt は入力欄に文字を打ち込むので、人間の打ちかけの文字と混ざって送られてしまう
             print(f"{args.id} の入力欄に人間が打ちかけの文字があります（{typing[:60]}）。人間が入力中なので送りませんでした。"
                   "人間に確かめてから、送ってよければ --force を付けてください。", file=sys.stderr)
             return 1
     try:
-        herdr.prompt(agent_name(meta), f"{SECRETARY_MARK} {args.text}")
+        herdr.prompt(worker_addr(meta), f"{SECRETARY_MARK} {args.text}")
     except HerdrError as e:
         if e.code == "agent_blocked" and asking_question(meta):
             print(f"{args.id} は選択式の質問を出しているので、文字では答えられません。"
@@ -1380,17 +1608,17 @@ def cmd_send(args) -> int:
     if not to.get("pane"):
         print(f"{args.id} はまだ起動していません（{to['status']}）。起動してから送り直してください。", file=sys.stderr)
         return 1
-    herdr = Herdr(load_config())
+    herdr = backend_for(to, load_config())
     typing = None
     with contextlib.suppress(Exception):
-        typing = herdr.input_text(agent_name(to))
+        typing = herdr.input_text(worker_addr(to))
     if typing:
         print(f"{args.id} の入力欄に人間が打ちかけの文字があるので送りませんでした。少し待ってから送り直すか、"
               "急ぐなら `sec note blocker` で秘書に伝えてください。", file=sys.stderr)
         return 1
     sec = home() / "bin" / "sec"
     try:
-        herdr.prompt(agent_name(to), f"{SECRETARY_MARK} {me['id']} からの伝言（同じ space のタスク。"
+        herdr.prompt(worker_addr(to), f"{SECRETARY_MARK} {me['id']} からの伝言（同じ space のタスク。"
                                      f"返事は `{sec} send {me['id']} \"...\"`）: {text}")
     except HerdrError as e:
         why = "許可や選択肢のダイアログで止まっている" if e.code == "agent_blocked" else str(e)
@@ -1453,8 +1681,8 @@ def cmd_choose(args) -> int:
     cfg = load_config()
     auto_bring(args.id, cfg)
     meta = read_meta(args.id)
-    herdr = Herdr(cfg)
-    name = agent_name(meta)
+    herdr = backend_for(meta, cfg)
+    name = worker_addr(meta)
     try:
         if herdr.agent_statuses().get(name) not in ("blocked", None):
             print(f"{args.id} の画面は選択待ちになっていません。`sec peek {args.id}` で確認してください。", file=sys.stderr)
@@ -1465,8 +1693,7 @@ def cmd_choose(args) -> int:
             downs = ["down"] * len(question.get("options") or [])
             if downs:
                 herdr.send_keys(name, *downs)
-            herdr.send_text(meta["pane"], text)
-            herdr.send_keys(name, "enter")
+            herdr.submit_text(meta, text)
     except HerdrError as e:
         print(f"送れませんでした（{e}）。ペイン {meta['pane']} で直接答えてください。", file=sys.stderr)
         return 1
@@ -1538,17 +1765,17 @@ def cmd_retry(args) -> int:
         if not meta.get("pane"):
             print("まだ起動していません。", file=sys.stderr)
             return 1
-        herdr = Herdr(load_config())
+        herdr = backend_for(meta, load_config())
         try:
-            if agent_name(meta) not in herdr.agent_names():
+            if worker_addr(meta) not in herdr.agent_names():
                 herdr.start_agent(meta, home() / "worker-settings.json")
                 meta.pop("agent_gone", None)
                 append_status(meta["id"], "start", "sec retry で作業エージェントを起動し直した",
                               evidence=f"pane {meta.get('pane')}")
-            text = herdr.input_text(agent_name(meta))
+            text = herdr.input_text(worker_addr(meta))
             if text and SECRETARY_MARK in text:
                 # 前に送った指示が入力欄に残っている。もう一度打つと 2 つ並ぶので、Enter だけ送る
-                herdr.send_keys(agent_name(meta), "enter")
+                herdr.send_keys(worker_addr(meta), "enter")
                 meta["awaiting_ack_since"] = now_iso()
             elif text:
                 write_meta(meta)
@@ -1648,6 +1875,8 @@ def bring(task_id: str | None, cfg: dict, quiet: bool = False) -> tuple[list[str
     task_id が None なら戻すだけ。(伝えること, うまくいかなかったこと) を返す。"""
     if task_id is not None and not (task_dir(task_id) / "meta.json").exists():
         return [], [f"{task_id} というタスクはありません"]
+    if backend_kind(cfg) == DESKTOP:
+        return peek_task(task_id, cfg)
     herdr = Herdr(cfg)
     done: list[str] = []
     with locked():
@@ -1662,6 +1891,8 @@ def bring(task_id: str | None, cfg: dict, quiet: bool = False) -> tuple[list[str
         if target is not None:
             if target["status"] == CLOSED:
                 return [], [f"{task_id} は閉じています"]
+            if task_backend(target) != TERMINAL:
+                return [], [f"{task_id} はデスクトップ版の herdr で動いているので、ターミナル版の秘書の横には出せません"]
             if target.get("pane") not in panes:
                 return [], [f"{task_id} のペインがありません（{'まだ起動していません' if not target.get('pane') else 'ペインが閉じられています'}）"]
             if target.get("shown") and panes[target["pane"]].get("tab_id") == me["tab_id"]:
@@ -1688,9 +1919,33 @@ def bring(task_id: str | None, cfg: dict, quiet: bool = False) -> tuple[list[str
     return [f"{task_id} を秘書の横に表示しました", *done], []
 
 
+def peek_task(task_id: str | None, cfg: dict) -> tuple[list[str], list[str]]:
+    """デスクトップ版の sec bring。デスクトップ版には、別のタブの端末を秘書のタブへ動かす操作がない
+    （pane.split と terminal.show は表示中の space を切り替えてしまう）。そこでタスクの端末を、
+    秘書の画面の上に重ねて出す（terminal.peek）。人間が × で閉じるか、go to でタスクのタブに移る。"""
+    if task_id is None:
+        return ["デスクトップ版では秘書の横にタスクを並べていないので、戻すものはありません。重ねて出した画面は × で閉じられます"], []
+    meta = read_meta(task_id)
+    if meta["status"] == CLOSED:
+        return [], [f"{task_id} は閉じています"]
+    if task_backend(meta) != DESKTOP:
+        return [], [f"{task_id} はターミナル版の herdr で動いているので、デスクトップ版の秘書からは出せません"]
+    herdr = HerdrApp(cfg)
+    try:
+        if meta.get("pane") not in herdr.pane_ids():
+            return [], [f"{task_id} のペインがありません（{'まだ起動していません' if not meta.get('pane') else 'ペインが閉じられています'}）"]
+        herdr.peek(meta)
+    except HerdrError as e:
+        return [], [f"{task_id} の画面を出せませんでした（{e}）"]
+    return [f"{task_id} の画面を秘書の画面の上に重ねて出しました。× で閉じ、go to でタスクのタブに移れます"], []
+
+
 def auto_bring(task_id: str, cfg: dict) -> None:
-    """人間がタスクに返事をしたり依頼したりしたら、そのタスクを秘書の横に出す。秘書が herdr の外なら何もしない。"""
-    if not cfg.get("auto_bring", True) or not os.environ.get("HERDR_PANE_ID"):
+    """人間がタスクに返事をしたり依頼したりしたら、そのタスクを秘書の横に出す。秘書が herdr の外なら何もしない。
+    デスクトップ版では、重ねて出す画面が秘書の画面を覆ってしまうので自動では出さない。"""
+    if not cfg.get("auto_bring", True) or not os.environ.get("HERDR_PANE_ID") or backend_kind(cfg) != TERMINAL:
+        return
+    if task_backend(read_meta(task_id)) != TERMINAL:
         return
     done, failed = bring(task_id, cfg, quiet=True)
     if done or failed:
@@ -1709,7 +1964,7 @@ def cmd_bring(args) -> int:
     return 1 if failed else 0
 
 
-def close_shown(task_id: str, herdr: Herdr, keep: bool) -> str:
+def close_shown(task_id: str, herdr: Backend, keep: bool) -> str:
     """秘書の横に表示しているタスクを閉じるとき。秘書のタブは閉じず、タスクのペインだけを閉じる。
     --keep-tab なら、ペインを space に戻して残す。"""
     with locked():
@@ -1730,7 +1985,7 @@ def close_shown(task_id: str, herdr: Herdr, keep: bool) -> str:
             write_meta(meta)
 
 
-def close_task_tab(meta: dict, herdr: Herdr) -> str:
+def close_task_tab(meta: dict, herdr: Backend) -> str:
     """タスクのタブを閉じる。space に残るのがこのタブだけで、同じ space に閉じていないタスクもなければ、
     space（ワークスペース）ごと閉じる。人間が足したタブや --keep-tab で残したタブがあれば space は残す。"""
     ws = meta.get("workspace")
@@ -1748,12 +2003,12 @@ def close_task_tab(meta: dict, herdr: Herdr) -> str:
 def cmd_close(args) -> int:
     """タスクを閉じ、タブも閉じる（中の Claude Code も終わる）。worktree は消さない。"""
     cfg = load_config()
-    herdr = Herdr(cfg)
     with locked():
         meta = read_meta(args.id)
         transition(meta, CLOSED, args.reason or "")
         write_meta(meta)
-        lines = fill_slots(cfg, herdr)
+        lines = fill_slots(cfg)
+    herdr = backend_for(meta, cfg)
     tab_note = "タブは残しています"
     if meta.get("shown"):
         tab_note = close_shown(args.id, herdr, keep=args.keep_tab)
@@ -1817,7 +2072,7 @@ def cmd_cleanup(args) -> int:
     if meta["status"] != CLOSED:
         print(f"{args.id} はまだ閉じていません（{meta['status']}）。先に `sec close {args.id}` してください。", file=sys.stderr)
         return 1
-    herdr = Herdr(cfg)
+    herdr = backend_for(meta, cfg)
     tab_alive = False
     if meta.get("tab") and not args.keep_tab:
         with contextlib.suppress(Exception):
@@ -1902,7 +2157,10 @@ def hook_script_problems() -> list[str]:
 
 
 def cmd_doctor(args) -> int:
-    problems = Herdr(load_config()).check() + hook_script_problems() + skill_update_problems(fetch=not args.no_fetch)
+    cfg = load_config()
+    kind = backend_kind(cfg)
+    print(f"このペインからは{'デスクトップ版' if kind == DESKTOP else 'ターミナル版'}の herdr でタスクを起動します。")
+    problems = make_backend(cfg, kind).check() + hook_script_problems() + skill_update_problems(fetch=not args.no_fetch)
     if not problems:
         print("問題ありません。")
         return 0
@@ -1920,11 +2178,16 @@ def hook_task_id() -> str | None:
     task_id = os.environ.get("SECRETARY_TASK_ID")
     if task_id:
         return task_id
-    pane = os.environ.get("HERDR_PANE_ID")
-    if not pane:
+    pane, terminal = os.environ.get("HERDR_PANE_ID"), os.environ.get("HC_TERMINAL_ID")
+    if pane:
+        # ペインを別のワークスペースに動かすと ID が変わるが、中のプロセスの HERDR_PANE_ID は起動したときのまま
+        owns = lambda m: task_backend(m) == TERMINAL and pane in (m.get("pane"), *m.get("pane_aliases", []))
+    elif terminal:
+        # デスクトップ版の端末 ID は、端末が生きている間変わらない
+        owns = lambda m: task_backend(m) == DESKTOP and m.get("terminal") == terminal
+    else:
         return None
-    # ペインを別のワークスペースに動かすと ID が変わるが、中のプロセスの HERDR_PANE_ID は起動したときのまま
-    owners = [m for m in all_metas() if pane in (m.get("pane"), *m.get("pane_aliases", [])) and m["status"] != CLOSED]
+    owners = [m for m in all_metas() if owns(m) and m["status"] != CLOSED]
     return max(owners, key=lambda m: parse_iso(m.get("started_at")))["id"] if owners else None
 
 
@@ -2064,10 +2327,11 @@ def take_over_watch() -> None:
     if pid_path.exists():
         try:
             old = int(pid_path.read_text())
-            if old != os.getpid():
+            if old != os.getpid() and is_watch_process(old):
                 os.kill(old, signal.SIGTERM)
                 for _ in range(50):
-                    os.kill(old, 0)
+                    if not is_watch_process(old):
+                        break
                     time.sleep(0.1)
         except (ValueError, ProcessLookupError, PermissionError):
             pass
@@ -2078,12 +2342,13 @@ def cmd_watch(args) -> int:
     if not args.once:
         take_over_watch()
     cfg = load_config()
-    herdr = Herdr(cfg)
+    # ターミナル版とデスクトップ版のタスクが混ざっていてもよいように、両方の版を用意しておく
+    backends = {k: make_backend(cfg, k) for k in BACKENDS}
+    usable = {k: b.available() for k, b in backends.items()}
     offset_path = home() / ".watch-offset"
     offset = int(offset_path.read_text()) if offset_path.exists() else 0
     last_snapshot = 0.0
-    use_snapshot = herdr.available()
-    if not use_snapshot:
+    if not any(usable.values()):
         print("[secretary] herdr が見つからないので snapshot の保険は無効です", flush=True)
     if not args.once and cfg.get("update_check", True):
         for p in hook_script_problems() + skill_update_problems():
@@ -2120,25 +2385,30 @@ def cmd_watch(args) -> int:
                         lines.append(line)
                 offset_path.write_text(str(offset))
 
-            # 2. 定期チェック（ペイン消失・無反応・manual 放置）
-            live = None
-            if use_snapshot and time.time() - last_snapshot > cfg["snapshot_interval_sec"]:
+            # 2. 定期チェック（ペイン消失・無反応・manual 放置）。snapshot は動いているタスクがいる版だけ取る
+            lives: dict[str, tuple[set[str], dict[str, str]]] = {}
+            if time.time() - last_snapshot > cfg["snapshot_interval_sec"]:
                 last_snapshot = time.time()
-                try:
-                    live = herdr.live()
-                except Exception as e:
-                    lines.append(f"[secretary] snapshot に失敗: {e}")
+                for kind in sorted({task_backend(m) for m in all_metas() if m["status"] in ACTIVE}):
+                    if not usable.get(kind):
+                        continue
+                    try:
+                        lives[kind] = backends[kind].live()
+                    except Exception as e:
+                        lines.append(f"[secretary] snapshot に失敗: {e}")
             for meta in all_metas():
+                kind = task_backend(meta)
+                live = lives.get(kind)
                 before = json.dumps(meta, sort_keys=True)
-                line = periodic_checks(meta, cfg, live, check_silence=live is not None or not use_snapshot,
-                                       herdr=herdr if use_snapshot else None)
+                line = periodic_checks(meta, cfg, live, check_silence=live is not None or not usable.get(kind),
+                                       herdr=backends[kind] if usable.get(kind) else None)
                 if json.dumps(meta, sort_keys=True) != before:
                     write_meta(meta)
                 if line:
                     lines.append(line)
 
             # 3. 空きがあればキューから起動
-            lines.extend(fill_slots(cfg, herdr))
+            lines.extend(fill_slots(cfg))
 
         backlog = sum(1 for m in all_metas() if m["status"] == REVIEW)
         limit = cfg.get("review_backlog_alert", 0)
@@ -2195,16 +2465,39 @@ def emit(lines: list[str], cfg: dict, records: list[str] = ()) -> None:
         print(line, flush=True)
 
 
+def is_watch_process(pid: int) -> bool:
+    """pid が動いている監視ループか。kill -0 は終わったのに親に回収されていないプロセス（ゾンビ）にも成功し、
+    pid が別のプロセスに使い回されていても成功するので、ps で状態とコマンドも見る。"""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        r = subprocess.run(["ps", "-o", "stat=,command=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return True
+    stat, _, command = r.stdout.strip().partition(" ")
+    return bool(stat) and not stat.startswith("Z") and SCRIPT_PATH.name in command and " watch" in command
+
+
 def watch_alive() -> bool:
     try:
-        os.kill(int((home() / ".watch.pid").read_text()), 0)
-        return True
+        return is_watch_process(int((home() / ".watch.pid").read_text()))
     except (OSError, ValueError):
         return False
 
 
+def reap_children() -> None:
+    """終わった監視ループを回収する。sec follow が起動した監視ループは sec follow の子なので、
+    回収しないと sec follow が動いている間ゾンビとして残る。"""
+    with contextlib.suppress(ChildProcessError):
+        while os.waitpid(-1, os.WNOHANG)[0]:
+            pass
+
+
 def ensure_watch() -> None:
     """監視ループを裏で動かす。Monitor が切れても止まらないよう、秘書のセッションから切り離して起動する。"""
+    reap_children()
     if watch_alive():
         return
     with open(home() / "watch.log", "ab") as out, open(home() / "watch.err", "ab") as err:
