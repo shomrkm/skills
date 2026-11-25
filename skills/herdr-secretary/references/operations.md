@@ -38,7 +38,7 @@ space の最後のタスクを `sec close` すると、space も閉じる。人�
 
 人間が横のペインを自分で別の場所へ動かしていたら、次の `sec bring` はそのペインを動かさず、横に出している印だけを外す。
 
-`sec new` で起動したとき、`sec reply` と `sec choose` で返事を送ったときは、自動で横に出す。止めるには `config.json` の `auto_bring` を `false` にする。秘書が herdr のペインの外で動いていて `HERDR_PANE_ID` がないときは、何もしない。
+`sec new` で起動したとき、`sec reply` と `sec choose` で返事を送ったときは、自動で横に出す。止めるには `config.json` の `auto_bring` を `false` にする。秘書が herdr のペインの外で動いていて `HERDR_PANE_ID` がないときは、何もしない。デスクトップアプリでは、`sec bring` はタスクの画面を秘書の画面に重ねて出すだけで、自動では出さない（[SKILL.md](../SKILL.md#秘書の横に出すタスク)）。
 
 ## 進み具合のログ（status.tsv）
 

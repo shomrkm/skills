@@ -5,7 +5,9 @@
 - **herdr 0.9.5 以上**。0.7.3 では `agent start` に `--kind` / `--pane` がなく、`unknown option: --kind` で起動に失敗する
 - herdr を上げたら、**サーバーも再起動する**。古いサーバーが動いたままだと、クライアントとの protocol が合わずに `protocol_mismatch` で失敗する。サーバーを止めるとすべてのペインのプロセスが止まるので、作業を区切ってから `herdr server stop` し、`herdr` で起動し直す
 
-`sec init` と `sec new` は、先に `herdr --version` と `herdr status --json` を見て、足りなければ何をすればいいかを出す。このとき `sec new` は登録せずに、終了コード 3 で終わる。いつでも `sec doctor` で確かめられる。
+デスクトップアプリ（Herdr.app）で使うときは、herdr コマンドは要らない。Herdr.app を開くと `~/.local/bin` に入る `herdr-app` と `hc`（herdr-core）を使う。ウィンドウが開いていないと `herdr-app` が答えないので、Herdr.app は開いたままにする。
+
+`sec init` と `sec new` は、先に herdr の準備ができているかを見る。ターミナル版なら `herdr --version` と `herdr status --json`、デスクトップアプリなら `herdr-app status` と `hc server status` だ。足りなければ何をすればいいかを出す。このとき `sec new` は登録せずに、終了コード 3 で終わる。いつでも `sec doctor` で確かめられる。`sec doctor` は、そのペインからどちらの herdr にタスクを起動するかも出す。
 
 ## 1. 初期化
 
@@ -36,19 +38,34 @@ python3 <このリポジトリ>/skills/herdr-secretary/scripts/secretary.py init
 
 hook は、`init` を実行したこのリポジトリの `scripts/secretary.py` を直接読む。PR をマージしただけでは手元のファイルは変わらないので、**マージしたら手元で `git pull` する**。pull すれば、動いている作業エージェントの hook にもすぐ効く。監視ループの `sec watch` は、`sec follow` が裏で起動し、起動したときのコードで動き続ける。そのため、pull したら `kill $(cat ~/secretary/.watch.pid)` で止める。動いている `sec follow` が、10 秒ほどで監視ループを新しいコードで起動し直す。
 
+`sec follow` は、`.watch.pid` の pid が動いている監視ループかを `ps` で確かめ、そうでなければ起動し直す。`kill -0` だけでは、終わったのに親に回収されていないプロセス（ゾンビ）や、別のプロセスに使い回された pid も生きていると判定してしまうからだ。`sec follow` は、自分が起動して終わった監視ループを回収する。
+
 監視ループは秘書のセッションから切り離して動き、秘書を終えても止まらない。止めたいときも `kill $(cat ~/secretary/.watch.pid)` する。`sec follow` が動いていれば起動し直されるので、先に秘書のセッションを終える。出力は `~/secretary/watch.log`、エラーは `~/secretary/watch.err` に残る。
 
 `sec watch` は起動時に upstream を fetch し、手元が遅れていれば `[secretary] スキルのリポジトリ（...）が upstream より N コミット遅れています` と知らせる。hook が別の場所のスクリプトを呼んでいるときも知らせる。`sec doctor` でも同じことを確かめられる。止めたいときは config.json の `update_check` を `false` にする。
 
 ## 2. 秘書の起動
 
-herdr のペインで `~/secretary` に移動して `claude` を起動する。このスキルが読み込まれるようにしておく。たとえば `~/.claude/skills/herdr-secretary` にシンボリックリンクを張る。
+herdr のペイン（ターミナル版でもデスクトップアプリでもよい）で `~/secretary` に移動して `claude` を起動する。このスキルが読み込まれるようにしておく。たとえば `~/.claude/skills/herdr-secretary` にシンボリックリンクを張る。
 
 秘書には `~/secretary/bin/sec` の実行を許可しておく。`.claude/settings.json` の `permissions.allow` に `Bash(~/secretary/bin/sec:*)` を入れる。
 
 ## 3. herdr との連携
 
-秘書は herdr のペインの中（`HERDR_ENV=1`）で動かす。そうすると、`herdr` コマンドがそのセッションを操作する。herdr を呼ぶ処理は `scripts/secretary.py` の `Herdr` クラスにまとめてあり、herdr 0.9.5 のソースと公式 agent skill に合わせてある。
+herdr にはターミナル版とデスクトップアプリがあり、サーバーも CLI も別だ。ターミナル版の `herdr` コマンドで作ったタブは、デスクトップアプリには出ない。そこで sec は、`sec new` を呼んだペインの環境変数でどちらを使うかを決める。
+
+- `HERDR_ENV` があればターミナル版。デスクトップアプリの端末の中でターミナル版を動かしているときも、内側のターミナル版を使う
+- `HC_TERMINAL_ID` があればデスクトップアプリ
+- どちらもなければターミナル版
+- `config.json` の `backend` を `herdr` か `desktop` にすると、環境変数を見ずにそちらを使う
+
+決めた版は meta.json の `backend` に残す。返事、画面読み、監視、close などは、秘書がいまどちらにいても、そのタスクを起動した版で操作する。キューで待っていたタスクも、登録したときの版で起動する。`backend` がない meta.json は、このスキルがデスクトップアプリに対応する前に作ったものなので、ターミナル版として扱う。
+
+herdr を呼ぶ処理は `scripts/secretary.py` のアダプタにまとめてある。ターミナル版は `Herdr` クラス、デスクトップアプリは `HerdrApp` クラスだ。
+
+### ターミナル版
+
+秘書は herdr のペインの中（`HERDR_ENV=1`）で動かす。そうすると、`herdr` コマンドがそのセッションを操作する。`Herdr` クラスは、herdr 0.9.5 のソースと公式 agent skill に合わせてある。
 
 | やること | コマンド |
 |---|---|
@@ -89,12 +106,48 @@ UserPromptSubmit が来たら、prompt の先頭で送り手を見分ける。`[
 
 herdr の版を上げて動かなくなったら、`herdr agent`・`herdr tab`・`herdr pane` のヘルプを見て `Herdr` クラスを直す。
 
+### デスクトップアプリ
+
+画面（space・タブ・ペイン）は `herdr-app`、端末の中身は `hc` で操作する。作業エージェントの宛先は、ペイン ID ではなく hc の端末 ID（`t7` など）だ。meta.json の `terminal` に残す。`HerdrApp` クラスは `herdr-app --skill` と `hc --skill`（herdr-core 0.1.22）に合わせてある。
+
+| やること | コマンド |
+|---|---|
+| space を探す | `herdr-app ls`（同じ space の閉じていないタスクがいる space、なければ `name` が space 名のもの） |
+| space にタブを足す（表示は切り替えない） | `herdr-app do tab.new '{"space", "name": "<id 名前>", "folder": <repo>, "argv": [...], "task": "[secretary] ...", "focus": false}'` |
+| space を作る（space がなかったとき） | `herdr-app do space.new '{"name": <space>, "tab": "<id 名前>", "folder", "argv", "task", "focus": false}'`。返り値の `space` / `tab` / `terminal` を使い、ペイン ID は `herdr-app ls` で引く |
+| Claude Code を起動 | タブを作るときの `argv` に `["env", "SECRETARY_TASK_ID=<id>", "SECRETARY_HOME=<home>", "claude", "--settings", <worker-settings.json>]` を渡す。タブに環境変数を渡す引数がないので env で包む。`hc ls` で端末の `agent` が `claude-code` になるまで待つ |
+| 最初の指示 | タブを作るときの `task`。Claude Code が入力を受け付けられるようになってから、アプリが送る |
+| `sec reply`・`sec send`・`sec retry` | `hc send <端末> "[secretary] ..."` |
+| ペインとエージェントの生存確認 | `herdr-app ls` / `hc ls --json`（`agent` が `claude-code` の端末だけを、動いている作業エージェントと見なす） |
+| 画面を読む（`sec peek`） | `hc read <端末> --lines N` |
+| 選択肢を選ぶ（`sec choose`） | `hc keys <端末> down ... enter`。自由記述は `hc send --force <端末> "<答え>"`。hc には Enter を押さずに打つ操作がないので、貼り付けと Enter をまとめて送る |
+| Claude Code が終わった端末で起動し直す（`sec retry`） | `hc send <端末> "env SECRETARY_TASK_ID=... claude --settings ..."`。タブの端末はシェルの中で動いているので、Claude Code が終わってもシェルが残る |
+| タスクの画面を出す（`sec bring`） | `herdr-app do terminal.peek '{"terminal"}'` |
+| タブ・space・ペインを閉じる | `herdr-app do tab.close` / `space.close` / `pane.close`（`confirmed: true`） |
+| 準備の確認（`sec doctor`） | `herdr-app status` / `hc server status` |
+
+hook は、`SECRETARY_TASK_ID` がなければ hc が付ける `HC_TERMINAL_ID` を見て、その端末を使っている閉じていないタスクを探す。
+
+hc のエラーは `{"error": {"kind", "message"}}` で stderr に出る。`blocked`（終了コード 9）は `agent_blocked`、`not_found` は `agent_not_found` に読み替え、ターミナル版と同じ扱いにする。`desktop_start_timeout_sec` 秒待っても Claude Code が動き出さなければ `agent_not_ready` として、起動画面で止まったときと同じに扱う。
+
+デスクトップアプリでは、確認画面を人間が進めると、アプリが最初の指示を送る。最初の指示が hook（UserPromptSubmit）で届いたら、起動画面で止まっていた blocked を running に戻す。秘書は `sec retry` しなくてよい。
+
+`sec bring` で別のタブのペインを秘書の横に並べる方法はない。`pane.split` と `terminal.show` は、表示中の space をタスクの space に切り替えてしまう。そこで `terminal.peek` で、タスクの画面を秘書の画面に重ねて出す。重ねた画面は秘書の画面をほぼ覆うので、`auto_bring` は効かない。
+
+デスクトップアプリを上げて動かなくなったら、`herdr-app commands` と `hc <command> --help` を見て `HerdrApp` クラスを直す。
+
 ## 4. 動作確認
 
 偽の herdr を使ったテストがある。偽の herdr は、herdr 0.9.5 と同じ引数を受け付け、同じ形の JSON を返す。テストは bash の構文を使うので、`bash` で動かす。
 
 ```bash
 bash skills/herdr-secretary/tests/test_flow.sh
+```
+
+デスクトップアプリ向けには、偽の `herdr-app` と `hc` を使うテストがある。偽物は 1 本のスクリプトで、呼ばれた名前でどちらとして振る舞うかを決める。
+
+```bash
+bash skills/herdr-secretary/tests/test_desktop_flow.sh
 ```
 
 本物の Claude Code で、hook から review までの流れを確かめるテストもある。このテストは `claude -p` を 1 回呼ぶ。
@@ -151,6 +204,10 @@ herdr をソースからビルドし、ヘッドレスのサーバーを立て�
 | `permission_repeat_quiet_min` | 10 | 同じタスクで同じ種類の許可待ち（同じルール候補、または保護パス）が続いたら、最初の通知からこの分数は通知を重ねない。0 で無効 |
 | `update_check` | `true` | `sec watch` の起動時に、スキルのリポジトリが upstream より遅れていないか、hook の向き先が合っているかを確かめる |
 | `notify` | `auto` | デスクトップ通知。`auto` は macOS なら osascript。`off` で無効。`{text}` を含むコマンドも書ける |
-| `auto_bring` | `true` | `sec new` で起動したタスクと、`sec reply`・`sec choose` で返事を送ったタスクを、秘書の横に出す |
+| `auto_bring` | `true` | `sec new` で起動したタスクと、`sec reply`・`sec choose` で返事を送ったタスクを、秘書の横に出す。ターミナル版だけ |
 | `bring_split` | `right` | `sec bring` でタスクのペインを秘書のペインのどちら側に並べるか。`right` か `down` |
-| `herdr_bin` | `herdr` | herdr のコマンド名 |
+| `backend` | `auto` | タスクを起動する herdr。`auto` は `sec new` を呼んだペインの環境変数で決める。`herdr`（ターミナル版）か `desktop`（デスクトップアプリ）で固定できる |
+| `herdr_bin` | `herdr` | ターミナル版 herdr のコマンド名 |
+| `herdr_app_bin` | `herdr-app` | デスクトップアプリの画面を操作するコマンド名 |
+| `hc_bin` | `hc` | デスクトップアプリの端末を操作するコマンド（herdr-core）の名前 |
+| `desktop_start_timeout_sec` | 60 | デスクトップアプリで、タブを作ってから Claude Code が動き出すまで待つ秒数 |
